@@ -15,10 +15,9 @@ const segmod = @import("segment");
 const editor = @import("editor");
 const completion = @import("completion");
 const render = @import("overlay");
-// The vim modal-editing engine is a prompt addon: its lifecycle (and mode
-// UI) rides the generated `prompt_subs` registry, so this module never
-// names it. Dropping vim.zig just shortens the `addons` array and leaves
-// the basic editor handlers in force.
+// The vim modal-editing engine is a prompt addon: its lifecycle rides the
+// generated `prompt_subs` registry, so this module never names it; dropping
+// vim.zig just shortens `addons`, leaving the basic editor handlers.
 pub const Addon = struct {
     register: *const fn () void,
     init: *const fn (std.mem.Allocator, usize) anyerror!void,
@@ -26,14 +25,12 @@ pub const Addon = struct {
 };
 
 /// The registry-facing spelling of this contract: build.zig types the
-/// generated `prompt_subs` array through it, so the generated module
-/// never names the concrete struct or a sibling's import alias.
+/// generated `prompt_subs` array through it, so no module names the struct.
 pub const Binding = Addon;
 pub const addons = @import("prompt_subs").addons;
 
 // Editor contract re-exports: the vim extensor and the tests import these
-// through the package core (`prompt`), never through the private `editor`
-// sibling, so the split is invisible to them.
+// through the package core (`prompt`), never the private `editor` sibling.
 pub const XK = editor.XK;
 pub const xk_return = editor.xk_return;
 pub const xk_escape = editor.xk_escape;
@@ -86,18 +83,16 @@ const PromptState = struct {
 
     key_syms: ?*xcb_key_symbols_t = null,
 
-    // Set by key handlers, `activate`, and `deactivate` to notify the bar
-    // that the prompt area needs redrawn. Consumed (read + cleared) by
-    // `consumeRedrawRequest` to avoid a circular import prompt <-> bar.
+    // Set by key handlers/`activate`/`deactivate` to notify the bar the
+    // prompt needs redraw; `consumeRedrawRequest` clears it (one-way import).
     redraw_pending: bool = false,
 };
 
 var g: PromptState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
-/// Called from bar.applyReload: the renderer's module globals are built
-/// against the OLD config's fonts and bar height, and a reload can change
-/// both.
+/// Called from bar.applyReload: these module globals are built against the
+/// OLD config's fonts and bar height.
 fn invalidateReloadCaches() void {
     render.invalidateReloadCaches();
 }
@@ -107,8 +102,7 @@ fn isActive() bool {
 }
 
 /// Milliseconds until the next blink toggle, or -1 when the blink
-/// animation isn't running. Non-negative only while the prompt is active
-/// in insert mode.
+/// animation isn't running (non-negative only in insert mode).
 fn blinkPollTimeoutMs() i32 {
     if (!g.is_active or g.vim_state.mode != .insert) return -1;
     return cursor_blink_ms;
@@ -116,12 +110,11 @@ fn blinkPollTimeoutMs() i32 {
 
 /// Toggle cursor blink visibility; called by the bar's blink timer.
 /// Flags a scoped repaint as well: while the prompt covers the title slot,
-/// the title's needsRepaint hook forwards the overlay's query, and an
-/// inactive overlay reports inactive, so the toggled caret reaches the
-/// screen without forcing a whole-bar redraw. The bar runs every
-/// onPollWakeup hook on any timer wakeup (the clock tick, not just the
-/// blink), so this guard (matching blinkPollTimeoutMs) keeps a
-/// non-blinking prompt from toggling invisible state.
+/// the title's needsRepaint hook forwards the overlay's query, so the
+/// toggled caret reaches the screen without a whole-bar redraw. The bar
+/// runs every onPollWakeup hook on any timer wakeup, so this guard
+/// (matching blinkPollTimeoutMs) keeps a non-blinking prompt from
+/// toggling invisible state.
 fn blinkTick() void {
     if (!g.is_active or g.vim_state.mode != .insert) return;
     render.blinkTick();
@@ -142,7 +135,6 @@ fn consumeRedrawRequest() bool {
 
 /// Initialises prompt state needed regardless of whether the prompt is
 /// ever opened: the bar service handles, vim engine, and key-symbol table.
-/// The completion/history/ghost buffers are embedded in the global.
 fn init(
     allocator: std.mem.Allocator,
     conn: *const anyopaque,
@@ -182,8 +174,7 @@ fn toggle() void {
 
 /// Query the X pointer and decide what close_window should do while the
 /// prompt is active: cursor over the bar -> kill the prompt; over a
-/// program -> let the WM close it (false); over nothing -> swallow the
-/// key silently.
+/// program -> let the WM close it; over nothing -> swallow the key.
 fn closeWindowOrPromptUnderCursor() bool {
     const cs = core.getState();
     const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
@@ -200,12 +191,11 @@ fn closeWindowOrPromptUnderCursor() bool {
 }
 
 /// Complete key-event routing entry point called by
-/// `core/input/keys.zig`. Keeps all prompt-specific routing out of the
-/// key handler: returns false immediately when inactive (normal keybind
+/// `core/input/keys.zig`. Keeps prompt-specific routing out of the key
+/// handler: returns false immediately when inactive (normal keybind
 /// dispatch), routes `close_window` by cursor position, and otherwise
 /// delegates to `handleKeyPress`. `bound_action` is whatever the keybind
-/// map resolved for this key; pass `state.map.get(key)` directly; null is
-/// fine when there's no binding.
+/// map resolved (null is fine when there's no binding).
 fn handlePromptKeypress(
     event: *const contract.KeyPressEvent,
     bound_action: ?*const types.Action,
@@ -215,10 +205,9 @@ fn handlePromptKeypress(
     // are read here, on the X side, via the concrete xcb type.
     const xevent: *const core.xcb.xcb_key_press_event_t = @ptrCast(@alignCast(event));
 
-    // When the mod key (Super) is held and a WM action is bound to this
-    // key, let the normal dispatcher run so WM operations don't cancel the
-    // prompt; close_window is still routed here to dismiss the prompt,
-    // but only when the cursor is over the bar itself.
+    // With the mod key (Super) held and a WM action bound to this key, let
+    // the normal dispatcher run so WM operations don't cancel the prompt;
+    // close_window still routes here when the cursor is over the bar.
     if (bound_action) |action| {
         if (action.* == .close_window) return closeWindowOrPromptUnderCursor();
         if (xevent.state & xcb.XCB_MOD_MASK_4 != 0)
@@ -229,15 +218,13 @@ fn handlePromptKeypress(
 
 /// Low-level key-press handler, called after all prompt-level routing.
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
-    // Only process XCB_KEY_PRESS events: press and release events share
-    // the same struct layout, so the loop sometimes casts a release and
-    // dispatches it here. Without this guard the Escape release is a
-    // trap: handleInsert switches to .normal on press, then handleNormal
-    // sees xk_escape with a clean pending and deactivates; and the prompt
-    // is gone before the next editing key arrives.
-    //
-    // Returning true (not false) keeps the release from falling through
-    // to WM keybind dispatch.
+    // Only process XCB_KEY_PRESS events: press and release share the same
+    // struct layout, so the loop sometimes casts a release and dispatches
+    // it here. Without this guard the Escape release is a trap:
+    // handleInsert switches to .normal on press, then handleNormal sees
+    // xk_escape with a clean pending and deactivates -- the prompt is gone
+    // before the next editing key arrives. Returning true keeps the
+    // release from falling through to WM keybind dispatch.
     if (masks.coreEventType(event.response_type) != xcb.XCB_KEY_PRESS) return true;
 
     const syms = g.key_syms orelse return false;
@@ -251,9 +238,8 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // XCB delivers a key event for every key including modifiers, so Shift
     // before '$'/'^' fires XK_Shift_L/R first. Reaching handleNormal, that
     // falls through to resetPendingCmd(), clearing any pending
-    // operator/count: why d$, d^, c$, y^, visual 3W, etc. silently become
-    // bare cursor moves. Modifier keysyms occupy 0xFFE1-0xFFEE; the check
-    // widens that band by one key on each side.
+    // operator/count: why d$, d^, c$, y^, visual 3W silently become bare
+    // cursor moves. Keysyms occupy 0xFFE1-0xFFEE; the band widens by one.
     if (masks.isModifierKeysym(sym)) return true;
 
     // Ctrl-modified keys. Route EVERY Ctrl key through the mode handler,
@@ -262,8 +248,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (ctrl_held) {
         const action = editor.handlers.handle_ctrl(&g.vim_state, sym);
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost
-        // is recomputed in the shared tail. The blink phase is left
-        // untouched.
+        // is recomputed in the shared tail; the blink phase is untouched.
         return finishKeyPress(action, false);
     }
 
@@ -274,8 +259,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // No handler installed means there is no modal engine to dispatch to,
     // so insert mode falls back to the basic editor. With one installed,
-    // insert keys go to the handler like every other mode -- an extensor
-    // that implements this contract is not bypassed for not being "vim".
+    // insert keys go to the handler like every other mode.
     const action = if (!editor.addon_active and g.vim_state.mode == .insert)
         handleInsertBasic(&g.vim_state, sym)
     else switch (g.vim_state.mode) {
@@ -286,8 +270,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 }
 
 /// Shared tail for every key that edited the buffer: run the action,
-/// recompute the ghost suggestion (a mode handler may have deleted or
-/// inserted text), and schedule a redraw. Returns true (event consumed).
+/// recompute the ghost suggestion, and schedule a redraw. Returns true.
 fn finishKeyPress(action: Action, refresh_blink: bool) bool {
     handleAction(action);
     completion.updateGhost(&g.vim_state);
@@ -298,8 +281,7 @@ fn finishKeyPress(action: Action, refresh_blink: bool) bool {
 }
 
 /// Inserts as much of the ghost completion as fits (clamped to the input
-/// limit), then finishes the key press, which recomputes the ghost for
-/// the new buffer. Returns true (event consumed).
+/// limit), then finishes the key press, which recomputes the ghost.
 fn acceptGhost() bool {
     const ghost = completion.ghost();
     const n_ghost: usize = if (ghost.len > 0 and g.vim_state.cursor == g.vim_state.len)
@@ -310,17 +292,14 @@ fn acceptGhost() bool {
     return finishKeyPress(.none, true);
 }
 
-/// Draw the title segment's content when the prompt is active, covering
-/// the whole title slot. Returns the right edge. Only invoked by the title
-/// segment's draw delegation while the prompt is open.
+/// Draw the title segment's content when the prompt is active, covering the
+/// whole title slot; returns the right edge (title's draw delegation).
 fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     // Clearing before the draw (not after) means a draw error still
-    // consumes the request, so a persistently failing overlay can't
-    // re-request forever.
+    // consumes the request, so a failing overlay can't re-request forever.
     render.clearBlinkRepaint();
     // While covered, title's pollTimeoutMsHook contributes no marquee
-    // wakeup (title owns that decision), so no explicit carousel pause is
-    // needed here.
+    // wakeup (title owns that decision), so no explicit pause is needed.
     return render.drawActive(ctx.dc, &ctx.config, ctx.height, x, ctx.width, &g.vim_state);
 }
 
@@ -376,33 +355,29 @@ fn activate() void {
     // always visible; reversed in deactivate() via dismissAfterPrompt().
     if (g.handlers) |h| h.presentForPrompt();
     // No xcb_flush: xcb_grab_keyboard_reply already drained the output
-    // buffer and presentForPrompt() flushes its own requests. Contrast
-    // with deactivate(), where xcb_ungrab_keyboard must arrive promptly.
+    // buffer, and presentForPrompt() flushes its own requests.
 }
 
 fn deactivate() void {
     g.is_active = false;
     // on_deactivate must be called in exactly the situations dispatch
-    // routed key input through the vim/normal handlers -- which is gated
-    // on editor.addon_active (whether a modal handler set is installed),
-    // not on any config key.
+    // routed key input through the vim/normal handlers -- gated on
+    // editor.addon_active (a modal handler set is installed), not a config key.
     if (editor.addon_active) editor.handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
     g.redraw_pending = true;
-    // Return the bar to whatever state it was actually in before the
-    // prompt forced it to the top (e.g. re-hide it if a fullscreen window
-    // is still active).
+    // Return the bar to whatever state it was in before the prompt forced
+    // it to the top (e.g. re-hide it if a fullscreen window is still active).
     if (g.handlers) |h| h.dismissAfterPrompt();
 }
 
 /// This module's bar-segment contribution. The prompt is a runtime overlay
-/// on the title slot, so a config's `[bar] segments` list does not carry
-/// it by default -- but `prompt` IS a valid entry (listing it renders the
-/// segment inline; the SEGMENT draw hook below is bound for that path).
-/// The SEGMENT draw: the prompt paints the full slot it was reserved, so
-/// its width is the reserved width.
+/// on the title slot, so a config's `[bar] segments` list does not carry it
+/// by default -- but `prompt` IS a valid entry (listing it renders the
+/// segment inline; the SEGMENT draw hook below is bound for that path): the
+/// prompt paints the full slot it was reserved, so its width is that slot.
 fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     const dc = segmod.castDraw(ctx);
     return contract.Painted.span(x, try draw(dc, x));

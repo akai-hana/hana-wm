@@ -11,9 +11,8 @@ const knob = @import("knob");
 const color = @import("color");
 const bar_sections = @import("bar_sections");
 
-/// Where in the workspace cell the activity indicator is drawn. TOML
-/// spelling: cardinal names verbatim; diagonals with hyphens or underscores
-/// in either axis order ("left-up" == "up_left").
+/// Where in the workspace cell the activity indicator is drawn. TOML spelling:
+/// cardinal names verbatim; diagonals with hyphens or underscores in either order.
 pub const IndicatorLocation = enum {
     up,
     down,
@@ -55,9 +54,8 @@ pub const BarSegmentAnchor = enum {
     right,
 };
 
-/// One column of the bar: an anchor + ordered segment-name list. Names
-/// resolve against the generated `bar_modules` registry; unknown names draw
-/// nothing.
+/// One column of the bar: an anchor + ordered segment-name list. Names resolve
+/// against the generated `bar_modules` registry; unknown names draw nothing.
 pub const BarLayout = struct {
     position: BarSegmentAnchor,
     segments: std.ArrayList([]const u8),
@@ -74,9 +72,8 @@ pub const SegmentProps = struct {
     underline: bool = false,
     bold: bool = false,
     italic: bool = false,
-    /// Absolute text size for the whole segment from a `size=N` token.
-    /// null = configured font size. Goes through the same sized
-    /// font-description path the indicator glyphs use, so measure/draw agree.
+    /// Absolute text size for the whole segment from a `size=N` token; null =
+    /// configured font size. Same sized font-description path keeps measure/draw agreeing.
     size: ?u16 = null,
 
     pub fn isDefault(self: SegmentProps) bool {
@@ -84,9 +81,8 @@ pub const SegmentProps = struct {
     }
 };
 
-/// Composite `[bar.properties]` keys for the workspaces segment: a base
-/// entry styling every tag and a `_selected` overlay for the current tag.
-/// The tags module reads them through `workspaceTextFg`/`workspaceIconProps`.
+/// Composite `[bar.properties]` keys for the workspaces segment: a base entry
+/// styling every tag and a `_selected` overlay for the current tag.
 pub const seg_workspaces = "workspaces";
 pub const seg_workspaces_selected = "workspaces_selected";
 
@@ -100,9 +96,8 @@ pub inline fn freeBarLayouts(
 }
 
 /// Frees the owned segment-name keys of a [bar.properties] segment map, then
-/// deinits the map itself. Values are scalars; only keys need freeing. Zig
-/// 0.16 HashMapUnmanaged.deinit leaves the struct `undefined` rather than
-/// reusable, so reset to `.empty` -- config reload reuses the field.
+/// deinits the map itself. Values are scalars; only keys need freeing. Zig 0.16
+/// HashMapUnmanaged.deinit leaves `undefined`, so reset to `.empty` for reload.
 pub fn freeSegmentMap(comptime V: type, map: *std.StringHashMapUnmanaged(V), allocator: std.mem.Allocator) void {
     var it = map.iterator();
     while (it.next()) |e| allocator.free(e.key_ptr.*);
@@ -154,24 +149,21 @@ pub const Config = struct {
     indicator_focused: ?[]const u8 = null,
     indicator_unfocused: ?[]const u8 = null,
     indicator_color: ?types.Color = null,
-    /// Indicator glyph color when its tag is the CURRENT one -- set
-    /// independently of the icon text color. Unset follows `indicator_color`,
-    /// then the tag's text color (see `workspaceIndicatorColor`).
+    /// Indicator glyph color when its tag is the CURRENT one -- set independently
+    /// of the icon text color. Unset follows `indicator_color`, then tag text color.
     selected_indicator_color: ?types.Color = null,
 
     clock_format: ?[]const u8 = null,
 
-    /// Volume slider sub display templates (null = built-in strings).
-    /// `{pct}` = 0-100 level; `{state}` = mute glyph. Muted sink prefers
-    /// volume_muted_format.
+    /// Volume slider sub display templates (null = built-in strings). `{pct}` =
+    /// 0-100 level; `{state}` = mute glyph. Muted sink prefers volume_muted_format.
     volume_format: ?[]const u8 = null,
     volume_muted_format: ?[]const u8 = null,
     /// Brightness slider sub display template (null = "BRT {pct}%").
     /// `{pct}` = 0-100 level; no muted second state.
     brightness_format: ?[]const u8 = null,
-    /// Brightness device pin: a `/sys/class/backlight/*` name, or with a
-    /// `led:` prefix an LED-class device under `/sys/class/leds/*`.
-    /// "" = auto-discovery.
+    /// Brightness device pin: a `/sys/class/backlight/*` name, or with a `led:`
+    /// prefix an LED-class device under `/sys/class/leds/*`. "" = auto-discovery.
     brightness_device: ?[]const u8 = null,
 
     /// Scroll the focused window's title through its slot on overflow
@@ -188,8 +180,7 @@ pub const Config = struct {
     /// optimistic commit.
     volume_read_interval_ms: i64 = 5000,
     /// Cap on redraw-settle rounds per event batch. Bounds keep a typo from
-    /// disabling settling (min 1) or turning one batch into a long redraw
-    /// loop (max 64).
+    /// disabling settling (min 1) or turning one batch into a long redraw loop (max 64).
     max_batched_redraws: u8 = 4,
 
     // run segment colors and prompt; all nullable, falling back to bar-wide
@@ -198,9 +189,8 @@ pub const Config = struct {
     run_prompt_color: ?types.Color = null, // falls back to primary_color
     run_prompt: ?[]const u8 = null, // prefix left of the input cursor
 
-    /// Per-segment text-color overrides, keyed by segment registry name.
-    /// From `[bar.properties].<segment>`; a segment with no entry paints in
-    /// `fg` (see `segmentFg`). Keys owned once; freed in deinit.
+    /// Per-segment text-color overrides, keyed by segment registry name. From
+    /// `[bar.properties].<segment>`; a segment with no entry paints in `fg`.
     segment_fg: std.StringHashMapUnmanaged(types.Color) = .empty,
     /// Per-segment NUMBER-color overrides from `[bar.properties].<segment>_value`;
     /// no entry falls back to the segment color (`segmentValueFg`). Keys owned once.
@@ -213,9 +203,8 @@ pub const Config = struct {
 
     transparency: f32 = 1.0,
 
-    // NOTE: indicator_focused/unfocused are always independently owned
-    // (each set via knob.assignStr which always dupes). If one mirrors
-    // the other, both point to separate allocations. Do not bypass assignStr.
+    // NOTE: indicator_focused/unfocused are always independently owned (each set
+    // via knob.assignStr which dupes) -- a mirror yields two allocations; do not bypass assignStr.
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         types.freeStrings(&self.workspace_icons, allocator, types.free_storage);
         types.freeStrings(&self.fonts, allocator, types.free_storage);
@@ -264,18 +253,16 @@ pub const Config = struct {
         return self.workspaceTextFg(false);
     }
 
-    /// Text color for workspace icon label `is_current`: the per-state
-    /// composite entry -- `workspaces_selected` on the current tag, base
-    /// `workspaces` elsewhere -- or the tag's default (selected_fg / bar fg).
+    /// Text color for workspace icon label `is_current`: the per-state composite
+    /// entry -- `workspaces_selected` on current, base `workspaces` elsewhere.
     pub inline fn workspaceTextFg(self: *const Config, is_current: bool) types.Color {
         if (is_current)
             return self.segment_fg.get(seg_workspaces_selected) orelse self.segment_fg.get(seg_workspaces) orelse self.selected_fg;
         return self.segment_fg.get(seg_workspaces) orelse self.fg;
     }
 
-    /// Pango style flags for workspace label `is_current`: base
-    /// `workspaces` flags for every tag, overlaid with non-default flags of
-    /// `workspaces_selected` on the current tag.
+    /// Pango style flags for workspace label `is_current`: base `workspaces`
+    /// flags for every tag, overlaid with non-default flags of `workspaces_selected`.
     pub inline fn workspaceIconProps(self: *const Config, is_current: bool) SegmentProps {
         var props = self.segmentProps(seg_workspaces);
         if (!is_current) return props;
@@ -328,9 +315,8 @@ pub const Config = struct {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * alpha16_ceiling));
     }
 };
-/// The knob table: every bar scalar knob, exactly once. Targets are relative
-/// to THIS Config. The `needs` ordering (base palette before the
-/// [bar.properties] color_from chain) is enforced by validateTable.
+/// The knob table: every bar scalar knob, exactly once. Targets are relative to
+/// THIS Config. The `needs` ordering is enforced by validateTable.
 fn barBool(key: []const u8, reader: []const u8) knob.Knob {
     return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, key, .b), reader);
 }
@@ -351,9 +337,8 @@ fn readerOr(k_in: knob.Knob, reader: []const u8) knob.Knob {
 }
 
 /// [bar.properties] color_from chain: reads a sibling bar field as fallback,
-/// gated on "bar". `copy_when_absent` (title variant) also assigns the
-/// fallback when [bar.properties] is absent; the run variant keeps null so
-/// the read-time fallbacks in Config apply. `reader` = owning module stem.
+/// gated on "bar". `copy_when_absent` (title variant) also assigns the fallback
+/// when the section is absent; the run variant keeps null (`reader` = module stem).
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool, reader: []const u8) knob.Knob {
     return readerOr(.{
         .places = &.{knob.place(types.section_bar_properties, key)},
@@ -396,9 +381,8 @@ pub const knobs = [_]knob.Knob{
     // max_batched_redraws: bar.zig's settle loop (core).
     readerOr(knob.knob(&.{knob.place(types.section_bar, "max_batched_redraws")}, "max_batched_redraws", .{ .int = .{ .T = u8, .min = 1, .max = 64 } }), ""),
 
-    // Base palette: read before every color_from consumer below. The
-    // window-state colors plus text_color are also document-global palette
-    // variables (resolvable by full reference from any section).
+    // Base palette: read before every color_from consumer below. The window-state
+    // colors plus text_color are also document-global palette variables.
     barPlainColor("bg", ""),
     barPlainColor("fg", ""),
     barPlainColor("selected_bg", "tags"),
@@ -423,15 +407,13 @@ pub const knobs = [_]knob.Knob{
     // the field null. Read via Config helpers, inlined into tags.zig.
     barColorOpt("indicator_color", "indicator_color", "fg", "tags"),
     // Selected-tag indicator glyph color: falls back at read time to
-    // indicator_color, then the tag's text color. The selected tag's icon
-    // TEXT color/styles use the [bar.properties] composite path
-    // ("workspaces_selected"), not a scalar knob.
+    // indicator_color, then the tag's text color. The selected tag's icon TEXT
+    // color/styles use the [bar.properties] composite path, not a scalar knob.
     barColorOpt("selected_indicator_color", "selected_indicator_color", "fg", "tags"),
 
     // [bar.properties] chain, gated on [bar] (parseBar returned before these
-    // when the section was missing). Title accents additionally COPY their
-    // fallback when [bar.properties] is absent; the run trio stay null so
-    // the read-time fallbacks in Config apply.
+    // when the section was missing). Title accents additionally COPY their fallback
+    // when the section is absent; the run trio stay null for Config's read-time fallbacks.
     barColor("title", "title_accent_color", types.palette_primary_color, true, "title"),
     barColor("title_unfocused", "title_unfocused_accent", types.palette_secondary_color, true, "title"),
     barColor("title_minimized", "title_minimized_accent", types.palette_alternative_color, true, "title"),
@@ -439,11 +421,10 @@ pub const knobs = [_]knob.Knob{
     barColor("run_fg", "run_fg", "fg", false, "prompt"),
     barColor("run_prompt_color", "run_prompt_color", types.palette_primary_color, false, "prompt"),
 
-    // Legacy `drun_*` aliases for the run segment: ALIASES, not a second set
-    // of fields -- each maps onto the same target as its canonical knob.
-    // A config that used the old keys keeps working with no edit, which is
-    // why this is a rename-with-alias. Aliases share the canonical knob's
-    // Knob.reader ownership.
+    // Legacy `drun_*` aliases for the run segment: ALIASES, not a second set of
+    // fields -- each maps onto the same target as its canonical knob. A config
+    // that used the old keys keeps working with no edit, which is why this is a
+    // rename-with-alias. Aliases share the canonical knob's Knob.reader ownership.
     readerOr(knob.knob(&.{knob.place(types.section_bar, "drun_prompt")}, "run_prompt", .str), "prompt"),
     barColor("drun_bg", "run_bg", "bg", false, "prompt"),
     barColor("drun_fg", "run_fg", "fg", false, "prompt"),
@@ -451,13 +432,11 @@ pub const knobs = [_]knob.Knob{
 };
 
 /// Module ownership for knobs whose only reader lives in an OPTIONAL module.
-/// Each entry is `.{ "target", "module_stem" }`: when the tree lacks that
-/// module the knob is legitimately unread, and the build's knob-reader scan
-/// excuses it (see Knob.reader). Plain data because the build needs a stable
-/// shape to text-scan; `validateOwnership` pins every pair to the knobs
-/// table's own `reader` fields so a typo is a build error. A target absent
-/// from this table must have a reader somewhere in the tree. Closed under
-/// alias: `drun_*` share the canonical `run_*` targets.
+/// Each entry is `.{ "target", "module_stem" }`: when the tree lacks that module
+/// the knob is legitimately unread, and the build's knob-reader scan excuses it
+/// (see Knob.reader). Plain data because the build needs a stable shape to text-
+/// scan; `validateOwnership` pins every pair to the knobs table's `reader` fields
+/// so a typo is a build error. Closed under alias: `drun_*` share `run_*` targets.
 pub const knob_reader_modules = [_][2][]const u8{
     .{ "carousel_enabled", "title" },
     .{ "carousel_speed_px_s", "title" },
@@ -483,9 +462,8 @@ pub const knob_reader_modules = [_][2][]const u8{
     .{ "run_prompt_color", "prompt" },
 };
 
-/// Config fields that are legitimately NOT knobs: the pair-interaction
-/// bespoke in parseBar (if only one of indicator_focused/unfocused is set,
-/// the other mirrors it).
+/// Config fields that are legitimately NOT knobs: the pair-interaction bespoke
+/// in parseBar (if only one of indicator_focused/unfocused is set, the other mirrors it).
 const bespoke_fields = [_][]const u8{
     "indicator_focused",
     "indicator_unfocused",
@@ -511,9 +489,8 @@ pub const sections = &[_][]const u8{
 /// this fragment's owner module (P2-50).
 pub const fallback_sections = &[_][]const u8{"bar"};
 
-/// Inert family (D13/P2-50): `[bar.properties]` is read only when bare
-/// `[bar]` is present; without the parent the property maps would parse and
-/// do nothing.
+/// Inert family (D13/P2-50): `[bar.properties]` is read only when bare `[bar]`
+/// is present; without the parent the property maps would parse and do nothing.
 pub const inert_families = &[_]types.InertFamily{
     .{
         .parent = types.section_bar,
@@ -527,9 +504,8 @@ pub const inert_families = &[_]types.InertFamily{
     },
 };
 
-/// The fragment parse entry: self-seed the owned defaults, apply the scalar
-/// knobs, then parse the non-scalar structures and the [bar.properties]
-/// segment maps.
+/// The fragment parse entry: self-seed the owned defaults, apply the scalar knobs,
+/// then parse the non-scalar structures and the [bar.properties] segment maps.
 pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
     var cfg: Config = .{};
     errdefer cfg.deinit(allocator);
@@ -553,19 +529,16 @@ pub fn validate(cfg: *const Config) !void {
         log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.font_size.value});
     }
 }
-/// The `[bar.properties]` segment decoder: segment-name keys the scalar
-/// knobs do not own. The knob-key test stays bound to the very table the
-/// knob loop reads, so a future `[bar.properties]` knob can never desync
-/// the map pass.
+/// The `[bar.properties]` segment decoder: segment-name keys the scalar knobs do
+/// not own. The knob-key test stays bound to the very table the knob loop reads,
+/// so a future `[bar.properties]` knob can never desync the map pass.
 ///
 /// `_value` suffix (`cpu_value`) = the segment's NUMBER color (the numeric
-/// readout); color-only. A plain `<segment>` entry is a composite: optional
-/// color + optional style flags. Flag spellings: `underline=true|false`,
-/// `underline true`, `underline 1`, or bare `underline` (true). The color
-/// is the first color-carrying item; a whole-array `+` color-mix resolves
-/// as a unit first; anything else is warn-and-skipped. Style-only keeps
-/// the segment's default `fg`. Runs after the knob loop so known keys are
-/// distinguishable; gated on [bar]; keys duped for Config's lifetime.
+/// readout); color-only. A plain `<segment>` entry is a composite: optional color
+/// + optional style flags. Flag spellings: `underline=true|false`, `underline true`,
+/// `underline 1`, or bare `underline` (true). Color is the first color-carrying item;
+/// a whole-array `+` color-mix resolves as a unit first, else warn-and-skipped.
+/// Style-only keeps `fg`. Runs after the knob loop; gated on [bar].
 pub fn applyBarProperties(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
@@ -585,9 +558,8 @@ pub fn applyBarProperties(
     }
 }
 
-/// True when `key` is a [bar.properties] scalar knob; every OTHER key in
-/// that table is a bar segment name. Scanned from this file's knob table so
-/// a future knob can never desync the map pass.
+/// True when `key` is a [bar.properties] scalar knob; every OTHER key in that
+/// table is a bar segment name. Scanned from this file's knob table (no desync).
 fn isBarPropertiesKnobKey(key: []const u8) bool {
     inline for (knobs) |k| {
         for (k.places) |pl| {
@@ -623,9 +595,8 @@ fn boolFromEqualsToken(token: []const u8) ?struct { name: []const u8, value: boo
     return null;
 }
 
-/// Bounds for `size=N` absolute text size in px: a segment smaller than a
-/// legible glyph or larger than the bar is a typo; unsupported spellings
-/// fall through to the normal invalid-token warn.
+/// Bounds for `size=N` absolute text size in px: a segment smaller than a legible
+/// glyph or larger than the bar is a typo; unsupported spellings warn normally.
 const size_px_min: u16 = 1;
 const size_px_max: u16 = 255;
 
@@ -652,9 +623,8 @@ fn firstColorInItems(
     return null;
 }
 
-/// Inserts one segment-keyed entry: dupes `seg_key`, hands ownership to
-/// `map` on success, rolls the key back on OOM so the map never holds a
-/// dangling key. The six put sites in `applySegmentEntry` share this contract.
+/// Inserts one segment-keyed entry: dupes `seg_key`, hands ownership to `map` on
+/// success, rolls the key back on OOM so the map never holds a dangling key.
 fn putSegmentEntry(
     comptime V: type,
     allocator: std.mem.Allocator,
@@ -685,9 +655,8 @@ fn applySegmentEntry(
     palette: *const std.StringHashMap(u32),
 ) !void {
     if (raw != .array) {
-        // Style-only single-token spellings: `<flag>` (true) and
-        // `<flag>=<bool>`. A non-default result is stored; a cleared flag
-        // (all-false props) is a no-op, exactly as an absent entry.
+        // Style-only single-token spellings: `<flag>` (true) and `<flag>=<bool>`.
+        // A non-default result is stored; a cleared flag is a no-op, as an absent entry.
         if (raw == .string) {
             const s = raw.asScalar([]const u8).?;
             var props = SegmentProps{};
@@ -718,9 +687,8 @@ fn applySegmentEntry(
 
     const items = raw.asArray().?;
     // A satisfying color-mix expression spans the whole array; resolve it as a
-    // unit first, so `a + (weight:40%) b` compounds aren't misread as stray
-    // tokens (the per-item scan below would grab just the head operand).
-    // Pure mixes are color-only, exactly as the pre-properties decoding.
+    // unit first, so `a + (weight:40%) b` compounds aren't misread as stray tokens
+    // (the per-item scan below would grab just the head operand).
     if (color.resolveColorExpr(raw, palette)) |mix| {
         try putSegmentEntry(types.Color, allocator, segmentColorMap(cfg, is_value), seg_key, mix);
         return;

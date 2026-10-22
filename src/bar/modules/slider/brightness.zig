@@ -6,12 +6,11 @@
 //! Backend: kernel sysfs (`/sys/class/backlight/<dev>/brightness` plus
 //! `max_brightness`), which is what tools like `brightnessctl` wrap. With a
 //! write policy (user in `video`, the shipped udev rule) a commit is one tiny
-//! file write, so drags need no throttle. A `brightnessctl` subprocess is used
-//! only as a fallback when a direct write is denied (EACCES/EROFS) or when no
-//! sysfs device exists; reads prefer sysfs. The backend flips to the spawn
-//! path permanently on the FIRST denied write, not per event. When no backend
-//! can write, the level still displays but interactions no-op
-//! (`g.read_only`), and a sub with nothing usable renders zero-width.
+//! file write, so drags need no throttle. A `brightnessctl` subprocess is
+//! used only as a fallback when a direct write is denied (EACCES/EROFS) or
+//! when no sysfs device exists; reads prefer sysfs. The backend flips to the
+//! spawn path permanently on the FIRST denied write. When no backend can
+//! write, the level still displays but interactions no-op (`g.read_only`).
 //!
 //! Device selection: auto-discovery scans `/sys/class/backlight/*` and picks
 //! the lexicographically smallest device with a positive `max_brightness`.
@@ -20,7 +19,7 @@
 //! LED-class panels so a status LED is never picked up accidentally.
 //!
 //! The sysfs I/O helpers take an explicit `base` root ("" = the real `/`),
-//! so tests can point them at a fabricated tree without touching the host.
+//! so tests can point them at a fabricated tree.
 
 const std = @import("std");
 const core = @import("core");
@@ -35,8 +34,8 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-/// Largest device/pin name accepted (sysfs names are short; a longer pin is
-/// ignored and auto-discovery is used instead).
+/// Largest device/pin name accepted; a longer pin is ignored and
+/// auto-discovery is used instead.
 const max_dev_len: usize = 64;
 
 const default_format = "BRT {pct}%";
@@ -44,25 +43,24 @@ const default_format = "BRT {pct}%";
 const Backend = enum { unknown, sysfs, brightnessctl };
 pub const Class = enum { backlight, leds };
 
-/// Consecutive total failures (no sysfs device AND no brightnessctl answer)
-/// tolerated before the module counts itself absent. Mirrors systatus':
-/// a single transient miss must not freeze the readout for a whole backoff.
+/// Consecutive total failures tolerated before the module counts itself
+/// absent. Mirrors systatus': a single transient miss must not freeze the
+/// readout for a whole backoff.
 const miss_tolerance: u8 = 3;
 
 /// How long an absent module goes unattempted before one more try. Without
 /// this, a machine with no backlight pays a device-tree scan plus two
-/// `brightnessctl` spawns every 1 s for the entire session. With it the
-/// absent module is silent but not abandoned: one slow re-probe keeps a
-/// hot-plugged panel or a since-boot missing tool visible.
+/// `brightnessctl` spawns every 1 s all session. With it the absent module
+/// is silent but not abandoned: one slow re-probe keeps a hot-plugged panel
+/// or a since-boot missing tool visible.
 const absent_reprobe_ms: i64 = 30_000;
 
 /// Owner state (P2-58): resolved backend/device, miss/backoff bookkeeping,
-/// the owned pin copy, and the display value. Read/write resolution mirrors
-/// the volume sub: sysfs first, brightnessctl as the no-sysfs fallback,
-/// `unknown` while nothing has answered. `misses` resets by the first
-/// success; `absent_until_ms` is armed when misses exhausts the tolerance.
-/// `pin` is `brightness_device` copied from config (config slices are freed
-/// on reload; poll-time reads need an owned copy).
+/// the owned pin copy, and the display value. Resolution mirrors the volume
+/// sub: sysfs first, brightnessctl fallback, `unknown` while nothing has
+/// answered. `misses` resets by first success; `absent_until_ms` is armed
+/// when misses exhausts the tolerance. `pin` is `brightness_device` copied
+/// from config (config slices are freed on reload).
 const BrightnessState = struct {
     backend: Backend = .unknown,
     misses: u8 = 0,

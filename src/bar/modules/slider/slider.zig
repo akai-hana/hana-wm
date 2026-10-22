@@ -8,32 +8,29 @@
 //!   - `Sub` is the surface contract every slider-like control binds.
 //!     `Write`/`CommitCost`/`Throttle` are DECLARED by the interaction shell
 //!     and re-exported here, so every control, test and the plugin template
-//!     keep naming one package (the mode and the latency class are
-//!     contract-visible vocabulary; the scheduler that switches on them is
-//!     interaction machinery).
-//!   - `subs` comes from the generated `slider_subs` registry (file presence +
-//!     self-declared role: a sibling without `pub const sub` is a private
+//!     keep naming one package (mode and latency class are contract-visible
+//!     vocabulary; the scheduler that switches on them is machinery).
+//!   - `subs` comes from the generated `slider_subs` registry (file presence
+//!     + self-declared role: a sibling without `pub const sub` is a private
 //!     implementation file, never a bound addon).
 //!   - the pct<->range map (`rawFromPct` / `clampPct` / `pctFromRaw`, plus the
 //!     `level.pctFromSlot` re-export the pure test shares).
-//!   - `segmentFor(i)` builds the `contract.Segment` the bar places for control
-//!     `i`, config identity `subs[i].name`. build.zig emits one entry per
-//!     discovered control with a `pub const sub`; its hooks reach into
-//!     `shell.zig` below (one-way: core -> shell).
+//!   - `segmentFor(i)` builds the `contract.Segment` the bar places for
+//!     control `i`; build.zig emits one entry per discovered control with a
+//!     `pub const sub`, and its hooks reach into `shell.zig` (one-way:
+//!     core -> shell).
 //!
-//! Everything that is not contract, map or binding lives beside this file:
-//!   - `shell.zig` -- the interaction shell (a click hit-tests the control's
-//!     own slot, exclusive press-hold drag, wheel steps, one-shot applies),
-//!     the poll loop (per-control cadence + owed-sweep), the commit
-//!     scheduler, and the per-segment lifecycle (arm-on-first-draw, poll
-//!     deadline, dirty redraw marking, painted-width tracking);
+//! Everything not contract, map or binding lives beside this file:
+//!   - `shell.zig` -- the interaction shell (slot hit-test, exclusive
+//!     press-hold drag, wheel steps, one-shot applies), the poll loop, the
+//!     commit scheduler, and the per-segment lifecycle (arm-on-first-draw,
+//!     poll deadline, dirty redraw, painted-width tracking);
 //!   - `spawn_capture.zig` -- the `/bin/sh` racers each control runs its
 //!     spawned commands through (allocation-free, inlined);
-//!   - `bar/render/drawing.zig` -- the format walker (`renderLineValue`) and the
-//!     `Label` a control renders with.
+//!   - `bar/render/drawing.zig` -- the format walker (`renderLineValue`) and
+//!     the `Label` a control renders with.
 //! A control keeps its OWN truth (backend handles, cached state, format); the
-//! core addresses it through hooks -- `read`/`pct`/`preview`/`commit`/`apply`
-//! -- and remembers only per-segment slot geometry, arming, and cadence.
+//! core addresses it through hooks -- `read`/`pct`/`preview`/`commit`/`apply`.
 
 const std = @import("std");
 const types = @import("types");
@@ -81,18 +78,16 @@ pub fn pctFromRaw(comptime T: type, raw: T, min: T, max: T) u8 {
 // surface in this tree:
 //
 //   - The CLOSED CORE is this file: the `Sub` contract, the pct map and the
-//     `segmentFor` binding; the generic per-control
-//     render/interaction/poll/commit shell sits beside it in `shell.zig`. The
-//     core never names a control module; every control is reached through
-//     `subs`, the generated registry (see build.zig's
-//     `buildSubsRegistryModule`).
+//     `segmentFor` binding; the generic per-control render/interaction/poll/
+//     commit shell sits beside it in `shell.zig`. The core never names a
+//     control module; every control is reached through `subs`, the generated
+//     registry (see build.zig's `buildSubsRegistryModule`).
 //
 //   - The OPEN MODULES are the siblings that bind `pub const sub: Sub`.
 //     Siblings WITHOUT the binding are private implementation files:
-//     importable by stem, never bound.
-//     Membership in `subs` -- and therefore a bar segment named after the
-//     control -- comes from FILE PRESENCE plus self-declared role, so adding
-//     a control is drop a file; deleting one is delete the file.
+//     importable by stem, never bound. Membership in `subs` -- and therefore
+//     a bar segment named after the control -- comes from FILE PRESENCE plus
+//     self-declared role, so adding a control is drop a file.
 
 pub const Sub = struct {
     /// Config identity ("volume", "brightness", ...): the name its bar

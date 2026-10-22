@@ -10,14 +10,11 @@
 //! type is `@TypeOf(subs[0])` rather than `slider.Sub`.
 //!
 //! Interaction: wheel ±2%; left press / press-hold drag sets the level from
-//! the horizontal position (accent-filled while held, label on release);
-//! right press is the secondary action (volume mute). Scrolls and drags
-//! commit per motion event. Whether they are THROTTLED depends on the
-//! commit's cost: native commits (ioctl / sysfs / libpulse) land immediately;
-//! subprocess spawns (pactl/amixer/brightnessctl) are rate-limited to
-//! `throttle_ms`, coalesced onto the newest value, flushed by the poll loop.
-//! Display always follows the optimistic `preview`; backend truth arrives on
-//! the next read. The 0-100 % clamp is each control's single guard.
+//! the horizontal position; right press is the secondary action (volume
+//! mute). THROTTLING depends on the commit's cost: native commits (ioctl /
+//! sysfs / libpulse) land immediately; subprocess spawns are rate-limited to
+//! `throttle_ms` and coalesced onto the newest value. Display follows the
+//! optimistic `preview`; backend truth arrives on the next read.
 
 const std = @import("std");
 const core = @import("core");
@@ -31,8 +28,8 @@ const contract = @import("bar_contract");
 /// ELEMENT type.
 const subs = @import("slider_subs").subs;
 
-/// The `Sub` contract type, named through the registry: naming it this way
-/// keeps the shell -> core edge out of the graph.
+/// The `Sub` contract type, named through the registry so the shell ->
+/// core edge stays out of the graph.
 const Sub = @TypeOf(subs[0]);
 
 const pctFromSlot = level.pctFromSlot;
@@ -42,23 +39,18 @@ const scroll_step: u8 = 2;
 /// anyway, so this only bounds how far ahead a single wake can be scheduled.
 const max_cadence_ms: i64 = 5000;
 
-/// The control's effective poll cadence: its runtime hook when it has one
-/// (a bar-config knob such as volume's `volume_read_interval_ms`), otherwise
-/// the static field. One spelling so the poll sites and the arm site cannot
-/// drift apart.
+/// The control's effective poll cadence: its runtime hook when it has one,
+/// else the static field. One spelling so poll and arm sites cannot drift.
 fn readIntervalMs(s: Sub) i64 {
     return if (s.read_interval_ms_of) |f| f() else s.read_interval_ms;
 }
 
 /// Spawn-commit window DEFAULT. A fork+exec+pipe+waitpid blocks the WM's
-/// event loop for ~1-5 ms, so a per-event spawn throttles the whole WM
-/// under a fast drag; coalescing onto the newest value keeps a sweep to at
-/// most one spawn per window. `immediate` commits ignore it; a control with
-/// a cheaper spawn can declare a tighter window via `Sub.commit_window_ms`.
+/// event loop for ~1-5 ms, so a per-event spawn throttles the whole WM under
+/// a fast drag; coalescing keeps a sweep to one window (`immediate` ignores it).
 const throttle_ms: i64 = 80;
 /// What the caller wants a `write` to do. One hook with a named mode so the
-/// clamp and the display update each live in one place: a module that
-/// differs in only one mode still writes each shared thing once.
+/// clamp and the display update each live in one place.
 pub const Write = enum {
     /// Display only: advance the label now, write nothing. Scroll/drag motion.
     preview,
@@ -70,16 +62,14 @@ pub const Write = enum {
     apply,
 };
 /// The latency class of ONE commit, as a value the scheduler switches on
-/// rather than a bare bool. Stays a function (not a field) because the class
-/// is a per-BACKEND fact that resolves at runtime: brightness writes sysfs in
-/// microseconds when live but spawns `brightnessctl` when not; volume is
-/// native over libpulse or ALSA depending on what it attached to.
+/// rather than a bare bool. Stays a function because the class is a per-BACKEND
+/// fact resolved at runtime (sysfs vs `brightnessctl`; libpulse vs ALSA).
 pub const CommitCost = enum { immediate, rate_limited };
 /// Commit scheduler for scroll/drag events, shared by every slider control.
 pub const Throttle = struct {
     interval_ms: i64,
-    /// Where a landed commit goes. Per control, so the control it writes to
-    /// belongs here rather than threaded through `apply`/`flushOwed`/`finish`.
+    /// Where a landed commit goes. Per control, so it belongs here rather
+    /// than threaded through `apply`/`flushOwed`/`finish`.
     write: *const fn (Write, u8) void,
     last_ms: i64 = 0,
     pending: bool = false,
@@ -102,8 +92,8 @@ pub const Throttle = struct {
     }
 
     /// Restarts the clock and clears any owed value, for an immediate
-    /// one-shot (the press that enters drag mode) so the first motion does
-    /// not double-send.
+    /// one-shot (the press entering drag mode) so first motion doesn't
+    /// double-send.
     pub fn reset(self: *Throttle) void {
         self.last_ms = core.realtimeMs();
         self.pending = false;
@@ -152,9 +142,8 @@ fn applyCommitWindow(idx: usize) void {
 }
 /// The shared `segmod.widthState` singleton for this control's name: owns
 /// the store / consumeRedrawRequest / resolved triple, and is the ONE
-/// denominator for the row reservation, the drag mapping and the click
-/// hit-test. `resolved` is the shared rule so they cannot disagree about
-/// "not measured yet".
+/// denominator for the row reservation, drag mapping and click hit-test --
+/// `resolved` is the shared "not measured yet" rule.
 fn widthStateFor(comptime idx: usize) type {
     return segmod.widthState(subs[idx].name);
 }
@@ -204,9 +193,8 @@ fn commitPreview(idx: usize, pct: u8) void {
 }
 
 /// Poll deadline for control `idx`: doesn't arm until its first draw, so an
-/// unconfigured control never wakes the loop. -1 while unarmed; ms until
-/// the next wake otherwise (0 = due now): the earliest of the read cadence
-/// and an owed commit flush.
+/// unconfigured control never wakes the loop. -1 while unarmed; ms until the
+/// next wake otherwise (0 = due now): earliest of read cadence and owed flush.
 pub fn pollDeadlineMsFor(idx: usize) i32 {
     const st = &g_state[idx];
     if (!st.armed) return -1;
@@ -280,20 +268,16 @@ pub fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     // naturalWidth reports 0 so the layout leaves no gap.
     if (!subPresent(subs[idx])) return contract.Painted.nothing(x);
     // While scrubbed the control is a loading bar; the label resumes on the
-    // drag-end redraw. The scrub fills the reserved slot, so reporting the
-    // painted span is a no-op against the measured label width it replaces --
-    // the label width must survive the scrub.
+    // drag-end redraw. The scrub fills the reserved slot, so the label width
+    // must survive the scrub and not be overwritten by the painted span.
     if (st.drag) {
         return contract.Painted.span(x, drawDragBar(dc, x, reservedWidth(idx), subLevelOrZero(subs[idx])));
     }
     const label = sub.label(dc.config, &st.scratch);
     const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value_start, label.value_len, dc.config.segmentProps(sub.name));
-    // Report the ACTUAL painted width, not the row reservation: the palette
-    // must follow the text, or the segment locks onto the startup probe and
-    // its neighbors overlap it forever. The store itself is NOT here: the bar
-    // hands the width back through onPainted, which owns the "changed ->
-    // owes a re-layout" rule; the module's pending flag means the OTHER
-    // reason a slider repaints (its value committed). Both consumed together.
+    // Report the ACTUAL painted width, not the row reservation (see the
+    // onPainted doc below): the module's pending flag means the OTHER repaint
+    // reason, a committed value; both are consumed together here.
     return contract.Painted.span(x, end_x);
 }
 
@@ -377,11 +361,10 @@ pub fn onDragEndFor(idx: usize, redraw: *const fn () void) void {
     }
 }
 /// Where the bar's painted-width report lands: this control's own width
-/// state, which its naturalWidth hook and the click bound's denominator
-/// read back. The store is not here: the bar hands the width back through
-/// onPainted, which owns "changed -> owes a re-layout"; the module's pending
-/// flag means the OTHER repaint reason (value committed). Both consumed
-/// together so neither can leak a request.
+/// state, which its naturalWidth hook and the click bound's denominator read
+/// back. The store is not here: the bar hands the width back through
+/// `onPainted`, which owns "changed -> owes a re-layout"; the module's
+/// pending flag means the OTHER repaint reason (value committed).
 pub fn onPaintedFor(comptime idx: usize, width: u16) void {
     widthStateFor(idx).store(width);
     if (widthStateFor(idx).consumeRedrawRequest()) g_state[idx].pending_redraw = true;
