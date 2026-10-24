@@ -160,14 +160,20 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 /// swap_master: exchanges the focused window's tiled slot with the previously
 /// focused window's (focus MRU), not the list head — a slot in the middle of
 /// a 3+ window workspace still swaps the pair the user expects. focus_swap
-/// variant moves focus to the previously focused window BEFORE the reconcile
-/// so the swapped-in window is focused on the first reconcile.
+/// variant moves focus to the previously focused VISIBLE window BEFORE the
+/// reconcile so the swapped-in window is focused on the first reconcile.
+/// Parked (minimized) MRU entries are skipped: they have no slot to swap and
+/// must not take focus until restored, so the target is the most recent
+/// focused window that can still be focused.
 pub fn swapPrimaryAction(focus_swap: bool) void {
     const m = pipeline.mut();
     const focused = m.focused orelse return;
     const mru = m.ws[m.current.index].focus_mru.constSlice();
-    if (mru.len < 2 or mru[1] == focused) return;
-    const displaced = mru[1];
+    // MRU[0] is maintained as the focused window (setFocus front-inserts);
+    // a divergence means the list cannot answer "previously focused", so the
+    // action is a no-op rather than swapping/focusing an unrelated entry.
+    if (mru.len < 2 or mru[0] != focused) return;
+    const displaced = focus.previousFocusCandidate(m, m.current, focused) orelse return;
     tiling_seam.swapFocusedWithPrevious(m);
     var ft: focus.FocusTransition = .none;
     if (focus_swap) {

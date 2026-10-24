@@ -260,6 +260,34 @@ test "fallbackFocusCandidate exclusion skips to the next focusable" {
     try testing.expectEqual(@as(?WindowId, 21), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 }
 
+// Mod+Tab (swap_master focus_swap) asks for the most recent focus-MRU entry
+// that can still take focus: parked/minimized and off-workspace entries are
+// skipped instead of being focused behind the user's back.
+test "previousFocusCandidate skips minimized and off-workspace MRU entries" {
+    var m = makeModel();
+
+    try minimize.init();
+    defer minimize.deinit();
+    regCur(&m, 30);
+    regCur(&m, 31);
+    regCur(&m, 32);
+    focus.setFocus(&m, 30);
+    focus.setFocus(&m, 31);
+    focus.setFocus(&m, 32); // MRU [32, 31, 30]
+    try testing.expectEqual(@as(?WindowId, 31), focus.previousFocusCandidate(&m, WSId.fromIndex(0), 32));
+
+    // Minimizing the previous focus skips it for the one before it.
+    try minimize.minimize(&m, 31);
+    try testing.expectEqual(@as(?WindowId, 30), focus.previousFocusCandidate(&m, WSId.fromIndex(0), 32));
+
+    // A window moved off the workspace keeps its stale MRU entry but is not
+    // a focus target here; with the focused window as the only visible MRU
+    // entry the answer is null (the focused window is never returned).
+    workspaces.moveWindowToWs(&m, 30, WSId.fromIndex(1));
+    try testing.expectEqual(@as(?WindowId, null), focus.previousFocusCandidate(&m, WSId.fromIndex(0), 32));
+    try testing.expectEqual(@as(?WindowId, 32), focus.previousFocusCandidate(&m, WSId.fromIndex(0), 30));
+}
+
 // closing the focused window must hand focus to the
 // PREVIOUSLY focused window.
 test "close-fallback candidate after unregister is the previous focus" {
