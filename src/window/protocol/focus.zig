@@ -638,7 +638,7 @@ pub inline fn maybeFocusWindow(win: u32) void {
 /// The ONE destroyed-window guard for a focus target. False when `win`
 /// may not take focus or be raised.
 ///
-/// Three checks, in the order that stops the work soonest, and ONE place they
+/// Four checks, in the order that stops the work soonest, and ONE place they
 /// live:
 ///
 ///  1. the invalid-window sentinel (a chrome XID is not a window),
@@ -648,14 +648,19 @@ pub inline fn maybeFocusWindow(win: u32) void {
 ///     spawn and the float toggle must not be focused and raised.
 ///     It costs no round trip -- a load and a compare on a table the caller
 ///     already has open.
-///  3. the blocking xcb_get_window_attributes liveness query, for the ONE
+///  3. parked (minimized) state -- a hidden window must not take focus until
+///     it is restored. This guards EVERY focus path, including direct
+///     grabFocus callers that do not gate through canFocusReach first.
+///  4. the blocking xcb_get_window_attributes liveness query, for the ONE
 ///     reason whose target liveness is not already known to be good from the
 ///     model: a mouse click lands on whatever is under the pointer, which may
 ///     be a window that is mapped-but-about-to-die. `last_applied` can still
 ///     name it, so re-focusing needs the live answer.
 fn resolveFocusTarget(win: u32, reason: Reason) bool {
     if (query.isInvalidWindow(win)) return false;
-    if (!pipeline.state().store.has(win)) return false;
+    const m = pipeline.state();
+    const e = m.store.get(win) orelse return false;
+    if (e.presence == .parked) return false;
     if (reason == .mouse_click and !isWindowMapped(core.getState().conn, win)) return false;
     return true;
 }
@@ -1053,6 +1058,10 @@ pub const focusedBorderColor = focus_select.focusedBorderColor;
 
 /// Minimize-fallback target policy (see focus_select).
 pub const fallbackFocusCandidate = focus_select.fallbackFocusCandidate;
+
+/// Most recent visible focus-MRU entry other than the focused window (see
+/// focus_select); the swap_master focus target.
+pub const previousFocusCandidate = focus_select.previousFocusCandidate;
 
 /// The visible windows of `ws` in ON-SCREEN order, for focus cycling (see
 /// focus_select).
