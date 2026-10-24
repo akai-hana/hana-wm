@@ -21,6 +21,7 @@ const xcb = core.xcb;
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
+const focus = @import("focus");
 const workspaces = @import("workspaces");
 const minimize = @import("minimize");
 const floating = @import("floating");
@@ -350,6 +351,49 @@ test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
     try std.testing.expectEqual(w3, order.items[1]);
     try std.testing.expectEqual(w2, order.items[2]);
     try std.testing.expectEqual(w2, m.focused.?);
+}
+
+test "actions: minimized windows are not focus targets and swap skips them" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const w1 = fx.createWindow();
+    const w2 = fx.createWindow();
+    window.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
+    fx.flush();
+    try std.testing.expectEqual(w2, m.focused.?);
+
+    // Minimize the focused window: focus falls back to w1, but w2 stays in
+    // the focus MRU (its entry is history, not a live focus target).
+    minimize.minimizeWindow(w2);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
+    try std.testing.expect(m.store.get(w2).?.presence == .parked);
+
+    // Mod+Tab (swap_master_focus_swap) must not resurrect the parked window:
+    // w1 is the last focused window that is still visible, and it already
+    // owns focus, so the action is a no-op.
+    window.swapPrimaryAction(true);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
+    try std.testing.expect(m.store.get(w2).?.presence == .parked);
+
+    // Direct focus requests for a parked window are refused as well.
+    focus.grabFocus(w2, .user_command);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
+    try std.testing.expect(m.store.get(w2).?.presence == .parked);
+
+    // After restoring, the same window is a valid focus target again.
+    minimize.unminimize(w2);
+    fx.flush();
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
 }
 
 test "actions: layout parameters adjust within clamps" {

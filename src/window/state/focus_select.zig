@@ -45,6 +45,21 @@ fn qualifies(m: *const model_mod.Model, cand: model_mod.WindowId, ws: model_mod.
     return model_mod.visibleOn(m, cand, ws);
 }
 
+/// The most recently focused window on `ws` other than `focused` that can
+/// still take focus there: focus MRU newest first, skipping `focused` and
+/// every entry that is not visible on `ws` (parked/minimized, or moved to
+/// another workspace). Null when no earlier visible window remains. This is
+/// the "previously focused" answer for swap_master focus_swap; unlike the
+/// minimize fallback it does not widen the scan to never-focused windows.
+pub fn previousFocusCandidate(m: *const model_mod.Model, ws: model_mod.WSId, focused: model_mod.WindowId) ?model_mod.WindowId {
+    const mru = &m.ws[ws.index].focus_mru;
+    for (mru.constSlice()) |cand| {
+        if (cand == focused) continue;
+        if (model_mod.visibleOn(m, cand, ws)) return cand;
+    }
+    return null;
+}
+
 /// Minimize-fallback target policy. Tier order on workspace `ws`: focus MRU
 /// (newest first), reversed tiled_order, then any visible floating-base
 /// window not in tiled_order. First `visibleOn(ws)` candidate wins; null
