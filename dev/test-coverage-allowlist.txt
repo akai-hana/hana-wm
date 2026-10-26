@@ -25,7 +25,6 @@ cursor          one startup X call (root cursor theme); the pure mouse-bind repo
 diagnostic      dumpState over live core state; covered by the e2e STATE DUMP log assertions
 dispatch        action execution against live model/X; covered by e2e and the X-gated action tests through seams
 document        parse document tree; its vocabulary is parser's public surface (parser_test imports parser)
-domain          X11-free vocabulary; reached through model (model_test and most subsystem tests)
 editor          prompt line editor; needs the chrome overlay fixture
 fibonacci       layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
 grid            layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
