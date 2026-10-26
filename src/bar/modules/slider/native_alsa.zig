@@ -130,7 +130,14 @@ fn iowr(comptime typ: u8, comptime nr: u8, comptime size: usize) c_ulong {
 /// numbers with bit 31 set (all _IOR/_IOWR) sign-extend into the kernel's
 /// unsigned request, exactly as they do from C.
 fn devctl(fd: c_int, request: c_ulong, ptr: anytype) c_int {
-    return c.ioctl(fd, @as(c_int, @bitCast(@as(u32, @truncate(request)))), ptr);
+    // musl declares the request as `int`, glibc as `unsigned long`: match
+    // whichever this libc's header says (bit-31 requests sign-extend on musl).
+    const Req = @typeInfo(@TypeOf(c.ioctl)).@"fn".params[1].type.?;
+    const req: Req = if (@typeInfo(Req).int.signedness == .signed)
+        @bitCast(@as(u32, @truncate(request)))
+    else
+        request;
+    return c.ioctl(fd, req, ptr);
 }
 
 /// `struct snd_ctl_card_info` from `sound/asound.h`: two ints, then the fixed
