@@ -47,35 +47,10 @@ const expectOrder = helpers.expectOrder;
 const addFloating = helpers.addFloating;
 const registerRange = helpers.registerRange;
 
-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
-/// list; every listed id exists in the store (single-membership invariant).
-/// Floating and parked (minimized) windows are home-free.
+/// Single-membership invariant (see `model.checkInvariants`): every tiled,
+/// present window sits in EXACTLY ONE workspace list, and every listed id exists.
 fn assertSingleMembership(m: *const Model) !void {
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        // A parked window keeps its anchor but has no tiled slot by design.
-        const tiled = (it.val.anchor == .tiled and it.val.presence == .present);
-        if (!tiled) continue;
-        var homes: usize = 0;
-        var actual_home: WSId = undefined;
-        for (&m.ws, 0..) |*s, wi| {
-            if (s.tiled_order.indexOfScalar(it.key) != null) {
-                homes += 1;
-                actual_home = WSId.fromIndex(wi);
-            }
-        }
-        try testing.expectEqual(@as(usize, 1), homes);
-        // The cached home_ws must name the workspace that ACTUALLY holds
-        // the window. The single-membership count above only proves exactly
-        // one list mentions it; a stale home_ws pointing elsewhere is the
-        // "stranded home" bug, and the count check cannot see it.
-        try testing.expectEqual(actual_home, it.val.home_ws);
-    }
-    for (&m.ws) |*s| {
-        for (s.tiled_order.constSlice()) |w| {
-            try testing.expect(m.store.has(w));
-        }
-    }
+    try model.checkInvariants(m);
 }
 
 // minimize tiled -> parked, removed from tiled_order; capacity refuses
@@ -97,7 +72,7 @@ test "minimize tiled removes from order; capacity refuses" {
     minimize.restore(&m, 102);
     try expectOrder(&m, WSId.fromIndex(0), &wins);
     try minimize.minimize(&m, 102);
-    try testing.expectEqual(@as(?WSId, null), e.home_ws);
+    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 102));
     var expected: [max_minimized]WindowId = undefined;
     _ = std.mem.replace(WindowId, &wins, &.{102}, &.{}, expected[0 .. wins.len - 1]);
     try expectOrder(&m, WSId.fromIndex(0), expected[0 .. wins.len - 1]);

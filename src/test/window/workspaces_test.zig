@@ -21,7 +21,7 @@ const workspaces = if (build_options.has_workspaces) @import("workspaces") else 
 
 const max_ws = model.max_workspaces;
 
-test "moveWindowToWs relocates mask, home_ws, and tiled membership" {
+test "moveWindowToWs relocates mask, home, and tiled membership" {
     var m = helpers.makeModel();
     helpers.regCur(&m, 101); // home workspace 0
     try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&m, 101).?);
@@ -30,7 +30,6 @@ test "moveWindowToWs relocates mask, home_ws, and tiled membership" {
 
     const e = m.store.get(101).?;
     try testing.expectEqual(model.bit(model.WSId.fromIndex(2)), e.mask);
-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), e.home_ws);
     try testing.expectEqual(model.WSId.fromIndex(2), model.findHome(&m, 101).?);
     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
     try testing.expectEqual(@as(usize, 0), m.ws[0].tiled_order.len);

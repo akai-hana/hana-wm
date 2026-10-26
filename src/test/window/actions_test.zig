@@ -68,7 +68,7 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
     try std.testing.expectEqual(rect.y, e.anchor.floating.y);
     try std.testing.expectEqual(rect.width, e.anchor.floating.width);
     try std.testing.expectEqual(rect.height, e.anchor.floating.height);
-    try std.testing.expectEqual(@as(?model.WSId, null), e.home_ws);
+    try std.testing.expectEqual(@as(?model.WSId, null), model.findHome(m, win));
     try std.testing.expectEqual(@as(usize, 0), model.tiledCountOnWs(m, m.current));
 
     const g = fx.geometry(win) orelse return error.ClosedWindow;
@@ -94,7 +94,7 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
 
     const e = m.store.get(win) orelse return error.UnknownWindow;
     try std.testing.expectEqual(model.bit(model.WSId.fromIndex(2)), e.mask);
-    try std.testing.expectEqual(model.WSId.fromIndex(2), e.home_ws.?);
+    try std.testing.expectEqual(model.WSId.fromIndex(2), model.findHome(m, win).?);
     try std.testing.expect(!model.visibleOn(m, win, m.current));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
     try fx.expectParked(win);
@@ -218,7 +218,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     fx.flush();
     const e1 = m.store.get(win) orelse return error.UnknownWindow;
     try std.testing.expect(e1.anchor == .floating);
-    try std.testing.expect(e1.home_ws == null);
+    try std.testing.expect(model.findHome(m, win) == null);
     const g1 = fx.geometry(win) orelse return error.ClosedWindow;
     try std.testing.expectEqual(before.x, g1.x);
     try std.testing.expectEqual(before.width, g1.width);
@@ -230,7 +230,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     try std.testing.expect(e2.anchor == .tiled);
     // The detach removed the tiled_order membership for real; re-entry
     // re-adds it (repairStrandedHome), so the window is a tiled member again.
-    try std.testing.expect(e2.home_ws != null);
+    try std.testing.expect(model.findHome(m, win) != null);
     try std.testing.expectEqual(@as(usize, 1), model.tiledCountOnWs(m, m.current));
     try fx.expectTiledGeometry(win); // back on the tiling grid
 }
@@ -268,7 +268,7 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
     // w2 is floating and out of the pile.
     const e2 = m.store.get(w2) orelse return error.UnknownWindow;
     try std.testing.expect(e2.anchor == .floating);
-    try std.testing.expectEqual(@as(?model.WSId, null), e2.home_ws);
+    try std.testing.expectEqual(@as(?model.WSId, null), model.findHome(m, w2));
     try std.testing.expectEqual(@as(usize, 2), model.tiledCountOnWs(m, m.current));
 
     // NO GAP: w3 reflowed off the pile into the freed slot (server truth =

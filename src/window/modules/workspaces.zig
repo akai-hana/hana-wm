@@ -37,23 +37,19 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     if (!ws.isValid()) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
     if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
 
+    // Only a window that holds a tiled seat has a list to move between;
+    // floating and parked windows just retag.
+    const home = model.findHome(m, win);
+    const relist = if (home) |h| !h.eql(ws) else false;
+
     // Refuse-before-mutate: full destination list cancels the move.
-    const to_new_ws = if (e.home_ws) |hw| !hw.eql(ws) else true;
-    if (e.home_ws != null and to_new_ws and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
+    if (relist and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
 
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
-    if (e.home_ws) |old_h| {
-        if (to_new_ws) {
-            // Only a tiled-anchor window lives in a tiled_order. A floating-
-            // anchored window can carry a stale home_ws (register seeds it),
-            // but appending it there would make a layout seat it cannot fill.
-            if (e.anchor == .tiled) {
-                model.removeValue(&m.ws[old_h.index].tiled_order, win);
-                _ = m.ws[ws.index].tiled_order.append(win);
-            }
-            e.home_ws = ws;
-        }
+    if (relist) {
+        model.removeValue(&m.ws[home.?.index].tiled_order, win);
+        _ = m.ws[ws.index].tiled_order.append(win);
     }
 }
 
@@ -109,20 +105,14 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     }
     // Removing the home tag must not strand the seat: the window can no
     // longer be placed on its old home workspace, so its tiled_order entry
-    // and home cache have to move to a surviving tag (or the seat drops and
-    // reconcile parks the unplaced window). Leaving it would inflate the old
-    // list's len and feed capacity refusals while the window never returns
-    // to a layout.
-    if (e.home_ws) |hw| {
+    // has to move to a surviving tag (or the seat drops and reconcile parks
+    // the unplaced window). Leaving it would inflate the old list's len and
+    // feed capacity refusals while the window never returns to a layout.
+    if (model.findHome(m, win)) |hw| {
         if (hw.eql(ws)) {
             model.removeValue(&m.ws[hw.index].tiled_order, win);
-            e.home_ws = null;
             if (e.anchor == .tiled) {
-                if (model.lowestBit(e.mask)) |h| {
-                    if (m.ws[h.index].tiled_order.append(win)) {
-                        e.home_ws = h;
-                    }
-                }
+                if (model.lowestBit(e.mask)) |h| _ = m.ws[h.index].tiled_order.append(win);
             }
         }
     }

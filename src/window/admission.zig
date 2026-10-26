@@ -491,7 +491,7 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
 /// `float_rect` admits the window already floating: the entry is registered
 /// tiled (core membership is tiled-only) and then immediately detached to the
 /// given rect with no home-list membership, mirroring detachTiledToFloating's
-/// anchor/home_ws state. The reconcile tail then sizes it floating in one
+/// anchor state. The reconcile tail then sizes it floating in one
 /// reconcile, so a float-rule spawn never flashes a tiled slot.
 ///
 /// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
@@ -559,7 +559,7 @@ pub fn mapRequest(
 
     // Float-rule admission: detach the entry from its tiled slot before the
     // fifo placement runs (which assumes a home slot, nonsensical for a
-    // floating window). The anchor/home_ws state mirrors toggleFloating's
+    // floating window). The anchor state mirrors toggleFloating's
     // detach, and the reconcile tail applies the rect in the same reconcile.
     if (float_rect) |rect| {
         if (e) |ep| model_mod.detachTiledToFloating(m, ep, win, rect);
@@ -737,13 +737,10 @@ pub fn applyRestoredRecord(m: *model_mod.Model, win: u32, record: *const session
 
     switch (record.anchor) {
         .tiled => {},
-        .floating => |rect| {
-            // Mirror toggleFloating's floating storage: anchor + home_ws null
-            // (a floating window has no tiled slot). The caller's reconcile
-            // sizes the window from this rect.
-            e.anchor = .{ .floating = rect };
-            e.home_ws = null;
-        },
+        // The same detach toggleFloating performs: the anchor carries the rect
+        // and the window leaves its tiled slot. The caller's reconcile sizes
+        // the window from this rect.
+        .floating => |rect| model_mod.detachTiledToFloating(m, e, win, rect),
     }
 
     // Presence that was non-present at save time is re-asserted through the
