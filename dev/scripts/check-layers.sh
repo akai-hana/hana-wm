@@ -302,7 +302,7 @@ while IFS= read -r line; do
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
 # Rule 3: no xcb imports/references in the pure state vocabulary
-# (model.zig + its private domain.zig), the split contract vocabulary
+# (model.zig), the split contract vocabulary
 # (tiling_contract.zig, contract_dispatch.zig, window_contract.zig,
 # bar_contract.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
@@ -320,10 +320,9 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
 # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
 # that scan, is the last line of defense on bodies. Only the state files are
-# swept: model.zig is the pure root (state plus the re-exported
-# Rect/Margins value objects and their coordinate helpers), its domain.zig
-# sibling is private to it, and the pure/ shelf carries no xcb tokens by
-# construction. The split contracts (from the 2026-10 monolithic
+# swept: model.zig is the pure root (state plus the Rect/Margins value
+# objects and their coordinate helpers), and the pure/ shelf carries no xcb
+# tokens by construction. The split contracts (from the 2026-10 monolithic
 # contract.zig) ARE on this side of the sweep: they name the key-press event
 # as an opaque `KeyPressEvent` and carry the connection as `*const anyopaque`,
 # so they are xcb-free vocabulary and are swept like any other pure file.
@@ -333,7 +332,7 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # contract_window.zig / contract_segment.zig into the monolith (2026-10-08)
 # and the monolith's later split into per-engine contracts are both history;
 # the sweep follows the files, not the lineage.)
-mapfile -t rule3_files < <(find src/core/architecture/domain.zig src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
+mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
 if [ "${#rule3_files[@]}" -eq 0 ]; then
     viol "rule 3 (sweep input set is empty)"
     hits=""

@@ -3309,11 +3309,10 @@ const Module = struct {
         edges: []const []const u8,
         source_paths: *const std.StringHashMap([]const u8),
     ) !void {
-        // The model vocabulary is the one pure root: core/model.zig (the
-        // public facade) plus the Rect/Margins values that state holds
-        // (core/architecture/domain.zig, private to the facade). `satI16`
-        // also serves the pure tiling layer, which is why the coordinate
-        // helpers cannot live on the x11 side. The src/core/pure/ shelf
+        // The model vocabulary is the one pure root: core/model.zig (state
+        // plus the Rect/Margins values it holds). `satI16` also serves the
+        // pure tiling layer, which is why the coordinate helpers cannot live
+        // on the x11 side. The src/core/pure/ shelf
         // (bounded, idmap) and src/core/display/ (scaling) are xcb-free by
         // construction. The architecture/ contract vocabulary
         // (contract_dispatch.zig, tiling_contract.zig) keeps xcb out as well
@@ -3333,8 +3332,7 @@ const Module = struct {
         // tiling-seam APIs, so its core imports are the orchestration design,
         // not layer leakage. Rule 3 still sweeps it for xcb tokens (none).
         if (std.mem.endsWith(u8, rel_path, "src/config/model_config.zig")) return;
-        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/domain.zig") or
-            std.mem.endsWith(u8, rel_path, "src/core/model.zig"))
+        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/model.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
             "tiling"
@@ -3357,9 +3355,8 @@ const Module = struct {
     /// The allowed-import policy behind `assertPureLayerImports`. The pure
     /// shelf — src/core/pure/ (bounded, idmap), src/core/display/scaling.zig,
     /// and the log/masks leaves — is xcb-free by construction and safe for
-    /// every layer; the state facade (`model`, which re-exports the private
-    /// vocabulary `domain`) is the shared data model AND the geometry
-    /// vocabulary (Rect/Margins) that the state holds. A pure layer's OWN
+    /// every layer; the state root (`model`) is the shared data model AND the
+    /// geometry vocabulary (Rect/Margins) that the state holds. A pure layer's OWN
     /// siblings are derived from the discovery walk (`source_paths`) rather
     /// than hand-listed, so the guard cannot go stale as a layer gains or
     /// loses files. The per-layer extras are the pure neighborhoods each
@@ -3390,8 +3387,7 @@ const Module = struct {
         // so the pure config layer's `@import("composed")` cannot trip the
         // guard if edge-based wiring ever sees the name.
         if (std.mem.eql(u8, dep, "composed")) return true;
-        if (std.mem.eql(u8, dep, "model") or
-            std.mem.eql(u8, dep, "domain")) return true;
+        if (std.mem.eql(u8, dep, "model")) return true;
         if (std.mem.eql(u8, layer, "model")) return false;
         // Same-layer siblings: any discovered module whose own source path
         // lives under this layer's directory root.

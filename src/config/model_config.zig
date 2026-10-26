@@ -13,7 +13,6 @@ const core = @import("core");
 const types = @import("types");
 const tiling_config = @import("tiling_config");
 const model_mod = @import("model");
-const domain = @import("domain");
 const pipeline = @import("pipeline");
 const tiling = @import("tiling_seam").tiling;
 const contract = @import("tiling_contract");
@@ -38,7 +37,7 @@ pub fn templateFrom(cfg: *const tiling_config.Config) model_mod.LayoutParams {
     return .{
         .kind = default_kind,
         .variant_idx = resolveVariant(cfg, default_kind, null),
-        .primary_count = domain.capPrimaryCount(cfg.master_count),
+        .primary_count = model_mod.capPrimaryCount(cfg.master_count),
         .primary_width = 0.5, // runtime-only; reset to the model default (LayoutParams.primary_width)
         .secondary_balance = 0,
     };
@@ -76,7 +75,7 @@ pub fn applyOverrides(
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (count_overrides[id]) |mc| s.params.primary_count = domain.capPrimaryCount(mc);
+        if (count_overrides[id]) |mc| s.params.primary_count = model_mod.capPrimaryCount(mc);
     }
 }
 
