@@ -222,7 +222,7 @@ test "admission register: the hint workspace is honored; a double register is a 
     var m = helpers.makeModel();
     try window_state_ops.register(&m, 10, model.WSId.fromIndex(2));
     try testing.expect(m.store.has(10));
-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), m.store.get(10).?.home_ws);
+    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), model.findHome(&m, 10));
     try testing.expect(m.ws[2].tiled_order.indexOfScalar(10) != null);
     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
 
@@ -231,7 +231,7 @@ test "admission register: the hint workspace is honored; a double register is a 
     try window_state_ops.register(&m, 10, model.WSId.fromIndex(3));
     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
     try testing.expectEqual(@as(usize, 0), m.ws[3].tiled_order.len);
-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), m.store.get(10).?.home_ws);
+    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), model.findHome(&m, 10));
 }
 
 test "admission unregister: the whole-model scrub clears stale lists and focus" {
@@ -239,7 +239,7 @@ test "admission unregister: the whole-model scrub clears stale lists and focus" 
     try window_state_ops.register(&m, 10, model.WSId.fromIndex(0));
     // Plant the id where it must NOT survive: another workspace's membership
     // lists (the stale-left-behind case the whole-model scan exists for --
-    // a home_ws-only removal would leave ws3 feeding a dead id to layout)
+    // a one-list removal would leave ws3 feeding a dead id to layout)
     // and the focus stack.
     try testing.expect(m.ws[3].tiled_order.append(10));
     try testing.expect(m.ws[3].focus_mru.append(10));
@@ -286,11 +286,11 @@ test "admission applyRestoredRecord: a tiled record reapplies mask, keeps anchor
     try testing.expect(e.anchor == .tiled);
     // tiled: register's home hint stands; membership lists are rebuilt by
     // session.applyModelLevel afterwards (F10), never by this pass.
-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(1)), e.home_ws);
+    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(1)), model.findHome(&m, 21));
     try testing.expect(e.presence == .present);
 }
 
-test "admission applyRestoredRecord: a floating record takes the rect and drops home_ws" {
+test "admission applyRestoredRecord: a floating record takes the rect and drops its tiled slot" {
     var m = helpers.makeModel();
     try window_state_ops.register(&m, 22, null);
     const rect = model.Rect{ .x = 10, .y = 20, .width = 300, .height = 200 };
@@ -304,8 +304,8 @@ test "admission applyRestoredRecord: a floating record takes the rect and drops 
     try testing.expect(e.anchor == .floating);
     try testing.expectEqual(rect, e.anchor.floating);
     // A floating window has no tiled slot -- the same detach toggleFloating
-    // performs; list surgery itself belongs to applyModelLevel's rebuild.
-    try testing.expectEqual(@as(?model.WSId, null), e.home_ws);
+    // performs.
+    try testing.expectEqual(@as(?model.WSId, null), model.findHome(&m, 22));
     try testing.expectEqual(rec.mask, e.mask);
 }
 
@@ -339,7 +339,7 @@ test "admission applyRestoredRecord: a parked record's ext blob replays through 
     try testing.expect(minimize.isMinimized(&m2, 23));
     const e = m2.store.get(23).?;
     try testing.expect(e.presence == .parked);
-    try testing.expectEqual(@as(?model.WSId, null), e.home_ws); // parkEntry clears home
+    try testing.expectEqual(@as(?model.WSId, null), model.findHome(&m2, 23)); // parked: no home
     try testing.expect(m2.ws[0].tiled_order.indexOfScalar(23) == null); // slot dropped
 }
 

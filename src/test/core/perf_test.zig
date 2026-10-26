@@ -75,8 +75,7 @@ test "bench: findHome scan (100 wins, 10 workspaces)" {
         helpers.benchLog("[bench] findHome (100 wins, 10 workspaces): {d:.1} ns/call\n", .{per_call_ns});
 
     for (0..100) |i| {
-        const e = m.store.get(@intCast(i + 1)).?;
-        try testing.expect(e.home_ws != null);
+        try testing.expect(model.findHome(&m, @intCast(i + 1)) != null);
     }
 }
 
@@ -287,7 +286,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
         );
 }
 
-test "bench: register (50 wins, home_ws cache setup)" {
+test "bench: register (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
@@ -299,7 +298,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
     if (bench) helpers.benchLog("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
 
     // Window-count shape behind the bench's name: a fresh fill leaves every
-    // id findable with its home-workspace cache set.
+    // id findable on a workspace.
     var filled = makeModel();
     try fill(&filled, 50);
     for (0..50) |i| {

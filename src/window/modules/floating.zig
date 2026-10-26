@@ -786,11 +786,9 @@ pub fn toggleFloating(win: model.WindowId) void {
 fn repairStrandedHome(m: *model.Model, e: *model.Entry, win: model.WindowId) bool {
     if (model.findHome(m, win) != null) return true;
     if (model.lowestBit(e.mask)) |h| {
-        // Commit home_ws only when the seat got an entry, and report
-        // failure so the caller can revert the anchor -- committing anyway
-        // would strand the window anchored-tiled with no seat.
+        // Report a full list so the caller can revert the anchor --
+        // carrying on would strand the window anchored-tiled with no seat.
         if (!m.ws[h.index].tiled_order.append(win)) return false;
-        e.home_ws = h;
     }
     return true;
 }

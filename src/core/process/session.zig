@@ -190,7 +190,7 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
     errdefer snap.deinit();
 
     // WindowRecord carries only the Entry fields that survive a re-exec
-    // (mask + mode); size_hints and home_ws are rebuilt by registration.
+    // (mask + mode); size_hints is rebuilt by registration.
     var widx: usize = 0;
     var it = m.store.iterator();
     while (it.next()) |item| : (widx += 1) {
@@ -402,6 +402,20 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
     }
 }
 
+/// Enforces single membership at the file boundary: a window already seated on
+/// an earlier workspace keeps that seat; later duplicates (a corrupt or
+/// hand-edited handoff file) are dropped, so `model.findHome` stays truthful.
+fn dropAlreadyListed(list: anytype, earlier: []const model.WsState) void {
+    var i: usize = 0;
+    while (i < list.len) {
+        const w = list.constSlice()[i];
+        const dup = for (earlier) |*ws| {
+            if (ws.tiled_order.indexOfScalar(w) != null) break true;
+        } else false;
+        if (dup) list.orderedRemove(i) else i += 1;
+    }
+}
+
 /// Restores model-level fields: current/focused/all_view, per-workspace
 /// params, tiled_order and focus_mru (pruned to registered windows). Call
 /// AFTER the adoption phase registered the surviving windows. No feature
@@ -459,6 +473,7 @@ pub fn applyModelLevel(m: *model.Model) void {
             s.params.variant_idx = 0;
         }
         restoreMembers(&s.tiled_order, r.tiled, m, model.max_tiled_per_ws);
+        dropAlreadyListed(&s.tiled_order, m.ws[0..i]);
         restoreMembers(&s.focus_mru, r.mru, m, model.mru_capacity);
     }
 
@@ -472,9 +487,11 @@ pub fn applyModelLevel(m: *model.Model) void {
     while (it.next()) |row| {
         const e = row.val;
         if (e.anchor != .tiled) continue;
-        const home = e.home_ws orelse continue;
-        if (m.ws[home.index].tiled_order.indexOfScalar(row.key) != null) continue;
-        if (m.ws[home.index].tiled_order.len >= model.max_tiled_per_ws) continue;
-        _ = m.ws[home.index].tiled_order.append(row.key);
+        if (model.findHome(m, row.key) != null) continue;
+        // Seat it where the user is looking when it is tagged there, else on
+        // its lowest tagged workspace (same policy as minimize's restore).
+        const seat = (if (model.taggedOn(e.*, m.current)) m.current else model.lowestBit(e.mask)) orelse continue;
+        if (m.ws[seat.index].tiled_order.len >= model.max_tiled_per_ws) continue;
+        _ = m.ws[seat.index].tiled_order.append(row.key);
     }
 }

@@ -41,10 +41,8 @@ fn setCovering(m: *model.Model, occupant: model.WindowId, ws: model.WSId) void {
 }
 
 /// Detaches `win` from every tiled slot so findHome returns null (the
-/// "stray" shape: no home_ws cache, no tiled_order membership).
+/// "stray" shape: no tiled_order membership).
 fn detach(m: *model.Model, win: model.WindowId) void {
-    const e = m.store.getPtr(win).?;
-    e.home_ws = null;
     for (0..m.ws.len) |i| {
         model.removeValue(&m.ws[i].tiled_order, win);
     }

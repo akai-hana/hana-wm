@@ -117,7 +117,7 @@ test "checkInvariants passes on a clean model and on home-free windows" {
     try assertSingleMembership(&m);
 }
 
-test "checkInvariants reports stranded, duplicated, stale and orphaned membership" {
+test "checkInvariants reports stranded, duplicated and orphaned membership" {
     // Stranded: a present tiled window evicted from every workspace list.
     var m = makeModel();
     regCur(&m, 1);
@@ -129,12 +129,6 @@ test "checkInvariants reports stranded, duplicated, stale and orphaned membershi
     regCur(&d, 1);
     try testing.expect(d.ws[1].tiled_order.append(1));
     try testing.expectError(error.DuplicateMembership, model.checkInvariants(&d));
-
-    // Stale: the window sits on workspace 0 but home_ws names workspace 1.
-    var s = makeModel();
-    regCur(&s, 1);
-    s.store.getPtr(1).?.home_ws = WSId.fromIndex(1);
-    try testing.expectError(error.StaleHomeWs, model.checkInvariants(&s));
 
     // Orphaned: an id listed on a workspace that has no store entry.
     var o = makeModel();
@@ -897,79 +891,52 @@ test "identical operation sequences produce identical models" {
     try testing.expect(!eqModel(&a, &c));
 }
 
-test "home_ws: register sets cache to current workspace" {
+test "findHome: register seats the window on the current workspace" {
     var m = makeModel();
     regCur(&m, 1); // register on workspace 0
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
 }
 
-test "home_ws: register on non-zero workspace" {
+test "findHome: register on non-zero workspace" {
     var m = makeModel();
     try window_state_ops.register(&m, 1, WSId.fromIndex(3));
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), m.store.get(1).?.home_ws);
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), model.findHome(&m, 1));
 }
 
-test "home_ws: findHome uses cache" {
+test "findHome: unmanaged window has no home" {
     var m = makeModel();
-    regCur(&m, 1);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
-    // findHome reads the cached home.
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
+    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 99));
 }
 
-test "home_ws: findHome scan fallback when cache is null" {
-    var m = makeModel();
-    regCur(&m, 1);
-    // A null cache simulates an entry with no recorded home.
-    m.store.getPtr(1).?.home_ws = null;
-    // findHome scans tiled_order and recovers the correct home.
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
-}
-
-test "home_ws: minimize clears cache" {
+test "findHome: minimize drops the home, restore re-seats it" {
     var m = makeModel();
     try minimize.init();
     defer minimize.deinit();
     regCur(&m, 1);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
     try minimize.minimize(&m, 1);
-    try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
+    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 1));
     try testing.expect(m.store.get(1).?.presence == .parked);
-}
-
-test "home_ws: restore sets cache after re-add" {
-    var m = makeModel();
-    try minimize.init();
-    defer minimize.deinit();
-    regCur(&m, 1);
-    try minimize.minimize(&m, 1);
-    try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
     minimize.restore(&m, 1);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
     try testing.expect(m.store.get(1).?.presence == .present);
 }
 
-test "home_ws: moveWindowToWs uses cache" {
+test "findHome: moveWindowToWs follows the window" {
     var m = makeModel();
     regCur(&m, 1);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
-    // moveWindowToWs reads the cached home rather than scanning.
     workspaces.moveWindowToWs(&m, 1, WSId.fromIndex(5));
-    // home_ws tracks the original home, not the current workspace, so it
-    // stays 0 while the window lands on workspace 5.
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(5)), model.findHome(&m, 1));
     try expectOrder(&m, WSId.fromIndex(5), &.{1});
+    try expectOrder(&m, WSId.fromIndex(0), &.{});
 }
 
-test "home_ws: detachToFloating clears cache" {
+test "findHome: detachTiledToFloating drops the home" {
     var m = makeModel();
     regCur(&m, 1);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
-    // The window-layer detach path clears home_ws; verify the result state
-    // (a floating entry carries null home_ws).
     const e = m.store.getPtr(1).?;
-    e.anchor = .{ .floating = .{ .x = 0, .y = 0, .width = 100, .height = 100 } };
-    e.home_ws = null;
-    try testing.expectEqual(@as(?WSId, null), e.home_ws);
+    model.detachTiledToFloating(&m, e, 1, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
+    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 1));
+    try expectOrder(&m, WSId.fromIndex(0), &.{});
 }
 
 // adjustPrimaryWidth clamps to [0.05, 0.95].
@@ -1068,7 +1035,7 @@ test "tag-move of a minimized window moves the record; restore lands on the new 
     minimize.restore(&m, 30);
     try expectOrder(&m, WSId.fromIndex(2), &.{30});
     try expectOrder(&m, WSId.fromIndex(0), &.{31});
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), m.store.get(30).?.home_ws);
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), model.findHome(&m, 30));
     try testing.expect(!minimize.isMinimized(&m, 30));
     try assertSingleMembership(&m);
 }

@@ -1,0 +1,2085 @@
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/bar/modules/slider/native_alsa.zig b/src/bar/modules/slider/native_alsa.zig
+--- a/src/bar/modules/slider/native_alsa.zig	2026-10-26 00:49:53.949382821 +0000
++++ b/src/bar/modules/slider/native_alsa.zig	2026-10-26 00:49:53.968838240 +0000
+@@ -130,7 +130,14 @@
+ /// numbers with bit 31 set (all _IOR/_IOWR) sign-extend into the kernel's
+ /// unsigned request, exactly as they do from C.
+ fn devctl(fd: c_int, request: c_ulong, ptr: anytype) c_int {
+-    return c.ioctl(fd, @as(c_int, @bitCast(@as(u32, @truncate(request)))), ptr);
++    // musl declares the request as `int`, glibc as `unsigned long`: match
++    // whichever this libc's header says (bit-31 requests sign-extend on musl).
++    const Req = @typeInfo(@TypeOf(c.ioctl)).@"fn".params[1].type.?;
++    const req: Req = if (@typeInfo(Req).int.signedness == .signed)
++        @bitCast(@as(u32, @truncate(request)))
++    else
++        request;
++    return c.ioctl(fd, req, ptr);
+ }
+ 
+ /// `struct snd_ctl_card_info` from `sound/asound.h`: two ints, then the fixed
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/config/model_config.zig b/src/config/model_config.zig
+--- a/src/config/model_config.zig	2026-10-26 00:49:53.948475052 +0000
++++ b/src/config/model_config.zig	2026-10-26 00:49:53.968088434 +0000
+@@ -13,7 +13,6 @@
+ const types = @import("types");
+ const tiling_config = @import("tiling_config");
+ const model_mod = @import("model");
+-const domain = @import("domain");
+ const pipeline = @import("pipeline");
+ const tiling = @import("tiling_seam").tiling;
+ const contract = @import("tiling_contract");
+@@ -38,7 +37,7 @@
+     return .{
+         .kind = default_kind,
+         .variant_idx = resolveVariant(cfg, default_kind, null),
+-        .primary_count = domain.capPrimaryCount(cfg.master_count),
++        .primary_count = model_mod.capPrimaryCount(cfg.master_count),
+         .primary_width = 0.5, // runtime-only; reset to the model default (LayoutParams.primary_width)
+         .secondary_balance = 0,
+     };
+@@ -76,7 +75,7 @@
+             // string still applies to the active kind).
+             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
+         }
+-        if (count_overrides[id]) |mc| s.params.primary_count = domain.capPrimaryCount(mc);
++        if (count_overrides[id]) |mc| s.params.primary_count = model_mod.capPrimaryCount(mc);
+     }
+ }
+ 
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/core/architecture/domain.zig b/src/core/architecture/domain.zig
+--- a/src/core/architecture/domain.zig	2026-10-26 00:49:53.949628403 +0000
++++ b/src/core/architecture/domain.zig	1970-01-01 00:00:00.000000000 +0000
+@@ -1,332 +0,0 @@
+-//! Pure vocabulary (no I/O): identifier types, state-held value objects, mask/tag and
+-//! layout-parameter records, feature enums, constants, helpers, and the generic Store
+-//! re-export. PRIVATE to the `core/model.zig` facade; the only sanctioned import past it
+-//! is the config→model seed. Geometry lives here because `Rect`/`Margins` are state-held
+-//! value objects and `satI16` also serves the pure `tiling/` layer. Layer rule: only
+-//! `std` and xcb-free vocabulary may be imported. Single-threaded.
+-const std = @import("std");
+-
+-const bounded = @import("bounded");
+-
+-/// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId` and
+-/// `model.WindowId` alias it, so ids cross the core/state boundary without
+-/// conversion.
+-pub const WindowId = u32;
+-
+-/// Canonical workspace identifier; `core.WorkspaceId` and `model.WSId` are both names for
+-/// this struct, so ids cross the core/state boundary without conversion. `.index` keeps
+-/// `ws` values usable directly as array indices. Range is a SEPARATE question from
+-/// representation: `fromIndex` is lenient (config/recovery), `fromIndexChecked` asserts
+-/// (internal), `isValid` is the question every fixed-size consumer asks.
+-pub const WorkspaceId = struct {
+-    index: u8,
+-
+-    /// Lenient constructor (the parser/restore entry point): narrows to u8 and deliberately
+-    /// does NOT range-check -- an out-of-range config value is recoverable there (the
+-    /// caller clamps or warns) while a panic would turn a config typo into a failed
+-    /// startup. Use `fromIndexChecked` for internal values that must be valid.
+-    pub fn fromIndex(i: anytype) WorkspaceId {
+-        return .{ .index = @intCast(i) };
+-    }
+-
+-    /// Constructive constructor: asserts a real workspace, so an internal 65th
+-    /// workspace fails at the boundary that created it rather than as a silent
+-    /// wrong-mask or out-of-bounds read further on.
+-    pub fn fromIndexChecked(i: anytype) WorkspaceId {
+-        const ws: WorkspaceId = .{ .index = @intCast(i) };
+-        std.debug.assert(isValidWorkspaceIndex(ws.index));
+-        return ws;
+-    }
+-
+-    /// True when this id names a workspace the model can hold. Past-ceiling values can
+-    /// still exist (lenient `fromIndex` admits them), so every fixed-size-array consumer
+-    /// must ask.
+-    pub fn isValid(self: WorkspaceId) bool {
+-        return isValidWorkspaceIndex(self.index);
+-    }
+-
+-    pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
+-        return self.index == other.index;
+-    }
+-};
+-
+-/// State-layer alias of the canonical WorkspaceId.
+-pub const WSId = WorkspaceId;
+-
+-/// The ONE validity notion for a workspace index: the mask shift, the state's
+-/// fixed-size `ws` array and the config lookup tables all ask here, so a raise of
+-/// `max_workspaces` cannot leave one answering a different question.
+-pub fn isValidWorkspaceIndex(i: anytype) bool {
+-    return @as(usize, @intCast(i)) < max_workspaces;
+-}
+-
+-/// Hard ceiling on workspaces the WM can meaningfully support -- not an arbitrary round
+-/// number: tiling.zig packs one bit per workspace into a u64 (`workspace_geom_valid_bits`)
+-/// and workspaces.zig's override tables are fixed-size arrays sized to match, so those
+-/// widen first. config.zig validates parsed workspace numbers against it.
+-pub const max_workspaces: usize = 64;
+-
+-/// Maximum tiled windows per workspace (tiled_order capacity). Buffers sized from this
+-/// are usize/u16-indexed, so raising it only costs memory. `View.hintsFor` is an O(n)
+-/// scan over exactly this bound -- past ~64, swap it for an index-aligned lookup FIRST.
+-pub const max_tiled_windows: usize = 64;
+-
+-/// Lower bound on the primary-column width ratio; config validation and the
+-/// runtime adjustment both clamp here.
+-pub const min_master_width: f32 = 0.05;
+-
+-/// Primary-column width caps at 95% so the secondary column always keeps some screen.
+-/// Single-sourced: config validation, the runtime pixel->ratio conversion and the
+-/// primary-width adjustment all clamp here.
+-pub const max_master_width: f32 = 0.95;
+-
+-/// Position and dimensions of a managed window, relative to the root window.
+-pub const Rect = struct {
+-    x: i16,
+-    y: i16,
+-    width: u16,
+-    height: u16,
+-    border_width: u16 = 0,
+-
+-    pub inline fn eql(self: Rect, other: Rect) bool {
+-        return self.x == other.x and self.y == other.y and self.width == other.width and
+-            self.height == other.height and self.border_width == other.border_width;
+-    }
+-
+-    /// Geometry only, ignoring `border_width`. The two comparators exist because geometry
+-    /// and border width ride different requests and sent-state, so comparing a whole `Rect`
+-    /// to decide "did the geometry move" makes a border-only change buy a spurious
+-    /// configure plus raise. Use `eql` for the full comparison.
+-    pub inline fn eqlGeom(self: Rect, other: Rect) bool {
+-        return self.x == other.x and self.y == other.y and self.width == other.width and
+-            self.height == other.height;
+-    }
+-};
+-
+-/// Width/height without a position: the resize-while-parked request shape. A parked window
+-/// must be resized OFFSCREEN so its client re-renders before a workspace switch shows it,
+-/// i.e. WIDTH|HEIGHT without X/Y. `sink.Configure.size` is the wire shape.
+-pub const Dims = struct {
+-    width: u16,
+-    height: u16,
+-};
+-
+-/// Gap and border widths applied around a tiled window.
+-pub const Margins = struct {
+-    gap: u16 = 0,
+-    border: u16 = 0,
+-};
+-
+-/// Twice the border width (the left+right / top+bottom inset).
+-pub inline fn doubledBorder(m: Margins) u16 {
+-    return 2 *| m.border;
+-}
+-
+-/// Saturating i16 coordinate clamp: narrows an i32 into the i16 `Rect` range, clamping
+-/// instead of wrapping so one pathological value can't cross the whole screen in
+-/// ReleaseFast.
+-pub inline fn satI16(v: i32) i16 {
+-    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
+-}
+-
+-/// Centers a `w`x`h` box over `parent`, clamped inside `bounds` (the work area): the
+-/// dialog-over-parent placement ICCCM's WM_TRANSIENT_FOR asks for. The clamp wins over
+-/// centering; a box larger than `bounds` pins to the bounds origin.
+-pub fn centerRectIn(parent: Rect, w: u16, h: u16, bounds: Rect) Rect {
+-    const bx: i32 = bounds.x;
+-    const by: i32 = bounds.y;
+-    const cx: i32 = @as(i32, parent.x) + @divTrunc(@as(i32, parent.width) - @as(i32, w), 2);
+-    const cy: i32 = @as(i32, parent.y) + @divTrunc(@as(i32, parent.height) - @as(i32, h), 2);
+-    const max_x: i32 = bx + @as(i32, bounds.width) - @as(i32, w);
+-    const max_y: i32 = by + @as(i32, bounds.height) - @as(i32, h);
+-    const x: i32 = if (max_x <= bx) bx else std.math.clamp(cx, bx, max_x);
+-    const y: i32 = if (max_y <= by) by else std.math.clamp(cy, by, max_y);
+-    return .{ .x = satI16(x), .y = satI16(y), .width = w, .height = h, .border_width = 0 };
+-}
+-
+-/// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value
+-/// XCB's configure_window value array expects.
+-pub inline fn toXcbCoord(v: i16) u32 {
+-    return @bitCast(@as(i32, v));
+-}
+-
+-/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range. The one
+-/// modulo-wrap in the tree (round-robin focus and layout cycles), so those callers name
+-/// it rather than reaching into a grab bag.
+-pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
+-    if (n == 0) return 0;
+-    return @intCast(@mod(@as(i64, @intCast(idx)) + dir, @as(i64, @intCast(n))));
+-}
+-
+-pub const Mask = u64;
+-
+-/// Mask bit for workspace `ws`. Two preconditions, both tied to `max_workspaces` rather
+-/// than restating its number: the index must name a real workspace and must fit the u64
+-/// mask. A shift by >= bitSizeOf would silently yield a wrong mask, so raising
+-/// max_workspaces past 64 is a loud build failure instead of a corrupt membership mask.
+-pub inline fn bit(ws: WSId) Mask {
+-    std.debug.assert(ws.isValid());
+-    std.debug.assert(ws.index < @bitSizeOf(Mask));
+-    return @as(Mask, 1) << @intCast(ws.index);
+-}
+-
+-/// Whether `mask` carries the tag bit for `ws`.
+-pub inline fn maskedOn(mask: Mask, ws: WSId) bool {
+-    return mask & bit(ws) != 0;
+-}
+-
+-pub const ALL_MASK: Mask = ~@as(Mask, 0);
+-
+-/// Single canonical size-hints record AND the only store: admission threads the parsed
+-/// WM_NORMAL_HINTS to mapRequest as a parameter (no staging copy anywhere). Do NOT
+-/// import layouts from here (layer rule).
+-pub const SizeHints = struct {
+-    /// PMinSize / PBaseSize floor. TILING deliberately does not ENFORCE declared minimums
+-    /// -- the layout engine owns tiled dimensions; honouring them would pin the rect and
+-    /// block mod_h/mod_l resizing (`tiling.applyHints` is the tiled-side delegate). It only
+-    /// serves as the ICCCM increment-snap fallback base when PBaseSize is absent. Only the
+-    /// floating drag-resize honours it as a user-facing floor.
+-    min_width: u16 = 0,
+-    min_height: u16 = 0,
+-    max_width: u16 = 0, // PMaxSize limit
+-    max_height: u16 = 0,
+-    inc_width: u16 = 0, // PResizeInc: w = base_width + N * inc_width
+-    inc_height: u16 = 0,
+-    /// PBaseSize: snap origin for PResizeInc (ICCCM sizes are base + N*inc); 0 when
+-    /// undeclared, so the snap falls back to `min_width` (the standard's own fallback).
+-    /// NOT a floor: tiling stays shrink-only.
+-    base_width: u16 = 0,
+-    base_height: u16 = 0,
+-    min_aspect: f32 = 0.0, // PAspect (dwm convention)
+-    max_aspect: f32 = 0.0,
+-
+-    /// True when every field is zero (no constraints declared).
+-    pub fn isEmpty(self: SizeHints) bool {
+-        return self.min_width == 0 and self.min_height == 0 and
+-            self.max_width == 0 and self.max_height == 0 and
+-            self.inc_width == 0 and self.inc_height == 0 and
+-            self.base_width == 0 and self.base_height == 0 and
+-            self.min_aspect == 0.0 and self.max_aspect == 0.0;
+-    }
+-
+-    /// Shrink-only PAspect fit: reduces whichever dimension of `w` x `h` is excess so the
+-    /// result lands inside the declared aspect band, cross-multiplied
+-    /// (`1/min_aspect <= w/h <= max_aspect`). Never grows; in-band sizes pass through.
+-    ///
+-    /// BOTH OR NEITHER: the two bounds are the halves of ONE rule -- a max bound alone
+-    /// clamps the offending DIMENSION, so a 400x50 window under `max_aspect = 4` gets
+-    /// NARROWER instead of taller. One bound alone returns the size unchanged. Callers
+-    /// clamp into the PMin/PMax envelope first. A dimension rounding out floors to 1.
+-    pub fn aspectFit(self: SizeHints, w: u16, h: u16) struct { width: u16, height: u16 } {
+-        if (self.min_aspect <= 0.0 or self.max_aspect <= 0.0)
+-            return .{ .width = w, .height = h };
+-        const fw: f32 = @floatFromInt(w);
+-        const fh: f32 = @floatFromInt(h);
+-        var out_w = w;
+-        var out_h = h;
+-        // Cross-multiplied to avoid a per-resize FP division pair. Clamp the product into
+-        // the u16 range before narrowing so a huge declared ratio caps instead of
+-        // trapping in ReleaseFast.
+-        if (fw > fh * self.max_aspect) {
+-            out_w = @min(roundAspectDim(fh * self.max_aspect), w);
+-        } else if (fh > fw * self.min_aspect) {
+-            out_h = @min(roundAspectDim(fw * self.min_aspect), h);
+-        }
+-        if (out_w == 0 and w > 0) out_w = 1;
+-        if (out_h == 0 and h > 0) out_h = 1;
+-        return .{ .width = out_w, .height = out_h };
+-    }
+-};
+-
+-/// Round a non-negative aspect product to the nearest integer, saturating at
+-/// the u16 wire limit.
+-inline fn roundAspectDim(product: f32) u16 {
+-    if (!(product > 0.0)) return 0; // zero or NaN (defensive; ratios are > 0)
+-    const clamped = std.math.clamp(@round(product), 0.0, @as(f32, std.math.maxInt(u16)));
+-    return @intFromFloat(clamped);
+-}
+-
+-/// Hard ceiling on distinct layouts in the cycle ring. Lives here because it bounds BOTH
+-/// the u8 `kind` registry index and the u8 `layout_idx` workspace override; config
+-/// enforces the cap at parse time (a 256th entry would trap the config-side `@intCast`).
+-pub const max_layouts = 256;
+-
+-pub const LayoutParams = struct {
+-    /// Index into the build-generated `tiling_modules` registry (dispatch order ==
+-    /// deterministic scan order), resolved from config at seed time; the registry layer
+-    /// disambiguates out-of-range values. The model stays registry-free.
+-    kind: u8 = 0,
+-    variant_idx: u8 = 0,
+-    primary_width: f32 = 0.5,
+-    primary_count: u8 = 1,
+-    secondary_balance: f32 = 0,
+-    /// Viewport state: model-owned so the layout engine stays pure. The
+-    /// snap-right-on-new-window and clamp duties belong to callers (reconcile_tails/sync).
+-    viewport_offset: i32 = 0,
+-    viewport_prev_count: u32 = 0,
+-};
+-
+-pub const BaseMode = union(enum) {
+-    /// Home workspace membership is DERIVED (exactly one `ws`.tiled_order list holds a
+-    /// tiled window; findHome). Visibility on other tagged workspaces is a sync-time mask
+-    /// filter (engine stays mask-agnostic).
+-    tiled,
+-    floating: Rect,
+-};
+-
+-/// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden by an
+-/// extension), `covering` (owns the screen on a workspace). Enumerates PATTERNS, not
+-/// features; parked/covering windows keep their `anchor`/`mask`.
+-pub const Presence = enum { present, parked, covering };
+-
+-// Shared vocabulary types: consumed by wire-side feature plugins and wire
+-// callers alike, so they live in core and neither imports a feature file.
+-
+-/// Restore-order over minimized windows: `.fifo` = oldest minimize seq,
+-/// `.lifo` = newest.
+-pub const RestoreOrder = enum { lifo, fifo };
+-
+-/// Optional increment of a floating window's geometry honored on
+-/// configure-request; null fields leave the current value unchanged.
+-pub const ConfigureReq = struct {
+-    x: ?i16 = null,
+-    y: ?i16 = null,
+-    width: ?u16 = null,
+-    height: ?u16 = null,
+-    border_width: ?u16 = null,
+-};
+-
+-/// Outcome of honoring a configure request against a floating window record.
+-pub const HonorDecision = enum { geometry_applied, border_only, ignored };
+-
+-/// Bounded sorted-key collection re-exported from the pure shelf; the model's
+-/// window store and the reconcile ledger share it without naming `core`/wire.
+-pub const Store = bounded.Store;
+-
+-/// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated), 16 keeps
+-/// the per-workspace focus MRU small; defined capacities mean state transitions never
+-/// allocate. tiling_contract's hintsFor scan is O(n) in max_tiled_windows, not this
+-/// store cap.
+-pub const store_capacity = 128;
+-
+-/// Primary-column capacity: capped at a quarter of the managed-window ceiling so one
+-/// workspace can't statically claim the store. Config lets master_count reach its u8
+-/// ceiling, so config-driven stamps go through `capPrimaryCount`.
+-pub const max_primary_count = store_capacity / 4;
+-
+-/// Clamps a configured primary count into [1, max_primary_count] -- the model's
+-/// primary-count invariant, and the one clamp config-driven seed stamps call. The
+-/// interactive `adjustPrimaryCount` clamps the same bounds inline instead: its delta runs
+-/// in i32 so a decrement below 1 cannot wrap a u8.
+-pub fn capPrimaryCount(count: u8) u8 {
+-    return std.math.clamp(count, 1, @as(u8, @intCast(max_primary_count)));
+-}
+-pub const mru_capacity = 16;
+-pub const max_tiled_per_ws = max_tiled_windows;
+-
+-/// Index (workspace id) of the lowest set bit in `m`, or null for the zero
+-/// mask (`@ctz(0)` = 64, out of u64 range -- see `bit`).
+-pub fn lowestBit(m: Mask) ?WSId {
+-    if (m == 0) return null;
+-    return WSId.fromIndex(@ctz(m));
+-}
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/core/model.zig b/src/core/model.zig
+--- a/src/core/model.zig	2026-10-26 00:49:53.949799589 +0000
++++ b/src/core/model.zig	2026-10-26 00:49:53.969204771 +0000
+@@ -1,64 +1,344 @@
+-//! Public state facade (MVC): WM state + operations, no I/O. Holds the
+-//! per-window store, per-workspace arrays, current workspace, focused id, and
+-//! all-view toggle, and re-exports the pure vocabulary state is built from
+-//! (`core/architecture/domain.zig` — private to this facade plus its sanctioned
+-//! `config/model_config.zig` seeding root). Single import surface for state:
+-//! callers do `@import("model")` and get vocabulary, records, `Model`, and
+-//! every state operation.
++//! State + vocabulary (MVC): WM state and its pure operations, no I/O. Holds
++//! the identifier types, state-held value objects (`Rect`/`Margins`), mask/tag
++//! and layout-parameter records, feature enums, constants and helpers, plus
++//! the per-window store, per-workspace arrays, current workspace, focused id,
++//! and all-view toggle. Callers do `@import("model")` and get everything:
++//! vocabulary, records, `Model`, and every state query.
+ //!
+-//! Layer rule: pure core (no X11, no feature imports). The only MODULE imports
+-//! are the shared bounded shelf and `domain` (std/builtin are language-level
+-//! edges, so this file still cannot reach the connection in `core.zig`).
+-//! Single-threaded.
++//! Layer rule: pure core (no X11, no feature imports). The only MODULE import
++//! is the shared bounded shelf (std/builtin are language-level edges, so this
++//! file cannot reach the connection in `core.zig`). Geometry lives here because
++//! `Rect`/`Margins` are state-held value objects and `satI16` also serves the
++//! pure `tiling/` layer. Single-threaded.
+ //!
+ //! Feature transitions live in the window layer's optional modules and the
+-//! tiling engine; this file exports vocabulary re-exports and pure queries.
++//! tiling engine; this file holds vocabulary and pure queries.
+ const builtin = @import("builtin");
+ const bounded = @import("bounded");
+-const domain = @import("domain");
+ const std = @import("std");
+ 
+-// Re-export vocabulary — EVERY decl of domain, one line each.
+-pub const WindowId = domain.WindowId;
+-pub const WorkspaceId = domain.WorkspaceId;
+-pub const WSId = domain.WSId;
+-pub const Mask = domain.Mask;
+-pub const ALL_MASK = domain.ALL_MASK;
+-pub const Rect = domain.Rect;
+-pub const Dims = domain.Dims;
+-pub const Margins = domain.Margins;
+-pub const SizeHints = domain.SizeHints;
+-pub const LayoutParams = domain.LayoutParams;
+-pub const BaseMode = domain.BaseMode;
+-pub const Presence = domain.Presence;
+-pub const RestoreOrder = domain.RestoreOrder;
+-pub const ConfigureReq = domain.ConfigureReq;
+-pub const HonorDecision = domain.HonorDecision;
+-
+-pub const max_workspaces = domain.max_workspaces;
+-pub const max_tiled_windows = domain.max_tiled_windows;
+-pub const max_tiled_per_ws = domain.max_tiled_per_ws;
+-pub const max_primary_count = domain.max_primary_count;
+-pub const max_layouts = domain.max_layouts;
+-pub const store_capacity = domain.store_capacity;
+-pub const mru_capacity = domain.mru_capacity;
+-pub const min_master_width = domain.min_master_width;
+-pub const max_master_width = domain.max_master_width;
+-
+-pub const isValidWorkspaceIndex = domain.isValidWorkspaceIndex;
+-pub const doubledBorder = domain.doubledBorder;
+-pub const satI16 = domain.satI16;
+-pub const centerRectIn = domain.centerRectIn;
+-pub const toXcbCoord = domain.toXcbCoord;
+-pub const wrapIndex = domain.wrapIndex;
+-pub const bit = domain.bit;
+-pub const maskedOn = domain.maskedOn;
+-pub const lowestBit = domain.lowestBit;
+-
+-/// The generic bounded sorted-key Store (the model's concrete instance is
+-/// `StoreT` below). Re-exported because the reconcile ledger and tests
+-/// instantiate it with other parameters (`ledger.zig:69`, `model_test.zig:37`).
+-pub const Store = domain.Store;
++/// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId` and
++/// `model.WindowId` alias it, so ids cross the core/state boundary without
++/// conversion.
++pub const WindowId = u32;
++
++/// Canonical workspace identifier; `core.WorkspaceId` and `model.WSId` are both names for
++/// this struct, so ids cross the core/state boundary without conversion. `.index` keeps
++/// `ws` values usable directly as array indices. Range is a SEPARATE question from
++/// representation: `fromIndex` is lenient (config/recovery), `fromIndexChecked` asserts
++/// (internal), `isValid` is the question every fixed-size consumer asks.
++pub const WorkspaceId = struct {
++    index: u8,
++
++    /// Lenient constructor (the parser/restore entry point): narrows to u8 and deliberately
++    /// does NOT range-check -- an out-of-range config value is recoverable there (the
++    /// caller clamps or warns) while a panic would turn a config typo into a failed
++    /// startup. Use `fromIndexChecked` for internal values that must be valid.
++    pub fn fromIndex(i: anytype) WorkspaceId {
++        return .{ .index = @intCast(i) };
++    }
++
++    /// Constructive constructor: asserts a real workspace, so an internal 65th
++    /// workspace fails at the boundary that created it rather than as a silent
++    /// wrong-mask or out-of-bounds read further on.
++    pub fn fromIndexChecked(i: anytype) WorkspaceId {
++        const ws: WorkspaceId = .{ .index = @intCast(i) };
++        std.debug.assert(isValidWorkspaceIndex(ws.index));
++        return ws;
++    }
++
++    /// True when this id names a workspace the model can hold. Past-ceiling values can
++    /// still exist (lenient `fromIndex` admits them), so every fixed-size-array consumer
++    /// must ask.
++    pub fn isValid(self: WorkspaceId) bool {
++        return isValidWorkspaceIndex(self.index);
++    }
++
++    pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
++        return self.index == other.index;
++    }
++};
++
++/// State-layer alias of the canonical WorkspaceId.
++pub const WSId = WorkspaceId;
++
++/// The ONE validity notion for a workspace index: the mask shift, the state's
++/// fixed-size `ws` array and the config lookup tables all ask here, so a raise of
++/// `max_workspaces` cannot leave one answering a different question.
++pub fn isValidWorkspaceIndex(i: anytype) bool {
++    return @as(usize, @intCast(i)) < max_workspaces;
++}
++
++/// Hard ceiling on workspaces the WM can meaningfully support -- not an arbitrary round
++/// number: tiling.zig packs one bit per workspace into a u64 (`workspace_geom_valid_bits`)
++/// and workspaces.zig's override tables are fixed-size arrays sized to match, so those
++/// widen first. config.zig validates parsed workspace numbers against it.
++pub const max_workspaces: usize = 64;
++
++/// Maximum tiled windows per workspace (tiled_order capacity). Buffers sized from this
++/// are usize/u16-indexed, so raising it only costs memory. `View.hintsFor` is an O(n)
++/// scan over exactly this bound -- past ~64, swap it for an index-aligned lookup FIRST.
++pub const max_tiled_windows: usize = 64;
++
++/// Lower bound on the primary-column width ratio; config validation and the
++/// runtime adjustment both clamp here.
++pub const min_master_width: f32 = 0.05;
++
++/// Primary-column width caps at 95% so the secondary column always keeps some screen.
++/// Single-sourced: config validation, the runtime pixel->ratio conversion and the
++/// primary-width adjustment all clamp here.
++pub const max_master_width: f32 = 0.95;
++
++/// Position and dimensions of a managed window, relative to the root window.
++pub const Rect = struct {
++    x: i16,
++    y: i16,
++    width: u16,
++    height: u16,
++    border_width: u16 = 0,
++
++    pub inline fn eql(self: Rect, other: Rect) bool {
++        return self.x == other.x and self.y == other.y and self.width == other.width and
++            self.height == other.height and self.border_width == other.border_width;
++    }
++
++    /// Geometry only, ignoring `border_width`. The two comparators exist because geometry
++    /// and border width ride different requests and sent-state, so comparing a whole `Rect`
++    /// to decide "did the geometry move" makes a border-only change buy a spurious
++    /// configure plus raise. Use `eql` for the full comparison.
++    pub inline fn eqlGeom(self: Rect, other: Rect) bool {
++        return self.x == other.x and self.y == other.y and self.width == other.width and
++            self.height == other.height;
++    }
++};
++
++/// Width/height without a position: the resize-while-parked request shape. A parked window
++/// must be resized OFFSCREEN so its client re-renders before a workspace switch shows it,
++/// i.e. WIDTH|HEIGHT without X/Y. `sink.Configure.size` is the wire shape.
++pub const Dims = struct {
++    width: u16,
++    height: u16,
++};
++
++/// Gap and border widths applied around a tiled window.
++pub const Margins = struct {
++    gap: u16 = 0,
++    border: u16 = 0,
++};
++
++/// Twice the border width (the left+right / top+bottom inset).
++pub inline fn doubledBorder(m: Margins) u16 {
++    return 2 *| m.border;
++}
++
++/// Saturating i16 coordinate clamp: narrows an i32 into the i16 `Rect` range, clamping
++/// instead of wrapping so one pathological value can't cross the whole screen in
++/// ReleaseFast.
++pub inline fn satI16(v: i32) i16 {
++    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
++}
++
++/// Centers a `w`x`h` box over `parent`, clamped inside `bounds` (the work area): the
++/// dialog-over-parent placement ICCCM's WM_TRANSIENT_FOR asks for. The clamp wins over
++/// centering; a box larger than `bounds` pins to the bounds origin.
++pub fn centerRectIn(parent: Rect, w: u16, h: u16, bounds: Rect) Rect {
++    const bx: i32 = bounds.x;
++    const by: i32 = bounds.y;
++    const cx: i32 = @as(i32, parent.x) + @divTrunc(@as(i32, parent.width) - @as(i32, w), 2);
++    const cy: i32 = @as(i32, parent.y) + @divTrunc(@as(i32, parent.height) - @as(i32, h), 2);
++    const max_x: i32 = bx + @as(i32, bounds.width) - @as(i32, w);
++    const max_y: i32 = by + @as(i32, bounds.height) - @as(i32, h);
++    const x: i32 = if (max_x <= bx) bx else std.math.clamp(cx, bx, max_x);
++    const y: i32 = if (max_y <= by) by else std.math.clamp(cy, by, max_y);
++    return .{ .x = satI16(x), .y = satI16(y), .width = w, .height = h, .border_width = 0 };
++}
++
++/// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value
++/// XCB's configure_window value array expects.
++pub inline fn toXcbCoord(v: i16) u32 {
++    return @bitCast(@as(i32, v));
++}
++
++/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range. The one
++/// modulo-wrap in the tree (round-robin focus and layout cycles), so those callers name
++/// it rather than reaching into a grab bag.
++pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
++    if (n == 0) return 0;
++    return @intCast(@mod(@as(i64, @intCast(idx)) + dir, @as(i64, @intCast(n))));
++}
++
++pub const Mask = u64;
++
++/// Mask bit for workspace `ws`. Two preconditions, both tied to `max_workspaces` rather
++/// than restating its number: the index must name a real workspace and must fit the u64
++/// mask. A shift by >= bitSizeOf would silently yield a wrong mask, so raising
++/// max_workspaces past 64 is a loud build failure instead of a corrupt membership mask.
++pub inline fn bit(ws: WSId) Mask {
++    std.debug.assert(ws.isValid());
++    std.debug.assert(ws.index < @bitSizeOf(Mask));
++    return @as(Mask, 1) << @intCast(ws.index);
++}
++
++/// Whether `mask` carries the tag bit for `ws`.
++pub inline fn maskedOn(mask: Mask, ws: WSId) bool {
++    return mask & bit(ws) != 0;
++}
++
++pub const ALL_MASK: Mask = ~@as(Mask, 0);
++
++/// Single canonical size-hints record AND the only store: admission threads the parsed
++/// WM_NORMAL_HINTS to mapRequest as a parameter (no staging copy anywhere). Do NOT
++/// import layouts from here (layer rule).
++pub const SizeHints = struct {
++    /// PMinSize / PBaseSize floor. TILING deliberately does not ENFORCE declared minimums
++    /// -- the layout engine owns tiled dimensions; honouring them would pin the rect and
++    /// block mod_h/mod_l resizing (`tiling.applyHints` is the tiled-side delegate). It only
++    /// serves as the ICCCM increment-snap fallback base when PBaseSize is absent. Only the
++    /// floating drag-resize honours it as a user-facing floor.
++    min_width: u16 = 0,
++    min_height: u16 = 0,
++    max_width: u16 = 0, // PMaxSize limit
++    max_height: u16 = 0,
++    inc_width: u16 = 0, // PResizeInc: w = base_width + N * inc_width
++    inc_height: u16 = 0,
++    /// PBaseSize: snap origin for PResizeInc (ICCCM sizes are base + N*inc); 0 when
++    /// undeclared, so the snap falls back to `min_width` (the standard's own fallback).
++    /// NOT a floor: tiling stays shrink-only.
++    base_width: u16 = 0,
++    base_height: u16 = 0,
++    min_aspect: f32 = 0.0, // PAspect (dwm convention)
++    max_aspect: f32 = 0.0,
++
++    /// True when every field is zero (no constraints declared).
++    pub fn isEmpty(self: SizeHints) bool {
++        return self.min_width == 0 and self.min_height == 0 and
++            self.max_width == 0 and self.max_height == 0 and
++            self.inc_width == 0 and self.inc_height == 0 and
++            self.base_width == 0 and self.base_height == 0 and
++            self.min_aspect == 0.0 and self.max_aspect == 0.0;
++    }
++
++    /// Shrink-only PAspect fit: reduces whichever dimension of `w` x `h` is excess so the
++    /// result lands inside the declared aspect band, cross-multiplied
++    /// (`1/min_aspect <= w/h <= max_aspect`). Never grows; in-band sizes pass through.
++    ///
++    /// BOTH OR NEITHER: the two bounds are the halves of ONE rule -- a max bound alone
++    /// clamps the offending DIMENSION, so a 400x50 window under `max_aspect = 4` gets
++    /// NARROWER instead of taller. One bound alone returns the size unchanged. Callers
++    /// clamp into the PMin/PMax envelope first. A dimension rounding out floors to 1.
++    pub fn aspectFit(self: SizeHints, w: u16, h: u16) struct { width: u16, height: u16 } {
++        if (self.min_aspect <= 0.0 or self.max_aspect <= 0.0)
++            return .{ .width = w, .height = h };
++        const fw: f32 = @floatFromInt(w);
++        const fh: f32 = @floatFromInt(h);
++        var out_w = w;
++        var out_h = h;
++        // Cross-multiplied to avoid a per-resize FP division pair. Clamp the product into
++        // the u16 range before narrowing so a huge declared ratio caps instead of
++        // trapping in ReleaseFast.
++        if (fw > fh * self.max_aspect) {
++            out_w = @min(roundAspectDim(fh * self.max_aspect), w);
++        } else if (fh > fw * self.min_aspect) {
++            out_h = @min(roundAspectDim(fw * self.min_aspect), h);
++        }
++        if (out_w == 0 and w > 0) out_w = 1;
++        if (out_h == 0 and h > 0) out_h = 1;
++        return .{ .width = out_w, .height = out_h };
++    }
++};
++
++/// Round a non-negative aspect product to the nearest integer, saturating at
++/// the u16 wire limit.
++inline fn roundAspectDim(product: f32) u16 {
++    if (!(product > 0.0)) return 0; // zero or NaN (defensive; ratios are > 0)
++    const clamped = std.math.clamp(@round(product), 0.0, @as(f32, std.math.maxInt(u16)));
++    return @intFromFloat(clamped);
++}
++
++/// Hard ceiling on distinct layouts in the cycle ring. Lives here because it bounds BOTH
++/// the u8 `kind` registry index and the u8 `layout_idx` workspace override; config
++/// enforces the cap at parse time (a 256th entry would trap the config-side `@intCast`).
++pub const max_layouts = 256;
++
++pub const LayoutParams = struct {
++    /// Index into the build-generated `tiling_modules` registry (dispatch order ==
++    /// deterministic scan order), resolved from config at seed time; the registry layer
++    /// disambiguates out-of-range values. The model stays registry-free.
++    kind: u8 = 0,
++    variant_idx: u8 = 0,
++    primary_width: f32 = 0.5,
++    primary_count: u8 = 1,
++    secondary_balance: f32 = 0,
++    /// Viewport state: model-owned so the layout engine stays pure. The
++    /// snap-right-on-new-window and clamp duties belong to callers (reconcile_tails/sync).
++    viewport_offset: i32 = 0,
++    viewport_prev_count: u32 = 0,
++};
++
++pub const BaseMode = union(enum) {
++    /// Home workspace membership is DERIVED (exactly one `ws`.tiled_order list holds a
++    /// tiled window; findHome). Visibility on other tagged workspaces is a sync-time mask
++    /// filter (engine stays mask-agnostic).
++    tiled,
++    floating: Rect,
++};
++
++/// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden by an
++/// extension), `covering` (owns the screen on a workspace). Enumerates PATTERNS, not
++/// features; parked/covering windows keep their `anchor`/`mask`.
++pub const Presence = enum { present, parked, covering };
++
++// Shared vocabulary types: consumed by wire-side feature plugins and wire
++// callers alike, so they live in core and neither imports a feature file.
++
++/// Restore-order over minimized windows: `.fifo` = oldest minimize seq,
++/// `.lifo` = newest.
++pub const RestoreOrder = enum { lifo, fifo };
++
++/// Optional increment of a floating window's geometry honored on
++/// configure-request; null fields leave the current value unchanged.
++pub const ConfigureReq = struct {
++    x: ?i16 = null,
++    y: ?i16 = null,
++    width: ?u16 = null,
++    height: ?u16 = null,
++    border_width: ?u16 = null,
++};
++
++/// Outcome of honoring a configure request against a floating window record.
++pub const HonorDecision = enum { geometry_applied, border_only, ignored };
++
++/// Bounded sorted-key collection re-exported from the pure shelf; the model's
++/// window store and the reconcile ledger share it without naming `core`/wire.
++pub const Store = bounded.Store;
++
++/// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated), 16 keeps
++/// the per-workspace focus MRU small; defined capacities mean state transitions never
++/// allocate. tiling_contract's hintsFor scan is O(n) in max_tiled_windows, not this
++/// store cap.
++pub const store_capacity = 128;
++
++/// Primary-column capacity: capped at a quarter of the managed-window ceiling so one
++/// workspace can't statically claim the store. Config lets master_count reach its u8
++/// ceiling, so config-driven stamps go through `capPrimaryCount`.
++pub const max_primary_count = store_capacity / 4;
++
++/// Clamps a configured primary count into [1, max_primary_count] -- the model's
++/// primary-count invariant, and the one clamp config-driven seed stamps call. The
++/// interactive `adjustPrimaryCount` clamps the same bounds inline instead: its delta runs
++/// in i32 so a decrement below 1 cannot wrap a u8.
++pub fn capPrimaryCount(count: u8) u8 {
++    return std.math.clamp(count, 1, @as(u8, @intCast(max_primary_count)));
++}
++pub const mru_capacity = 16;
++pub const max_tiled_per_ws = max_tiled_windows;
++
++/// Index (workspace id) of the lowest set bit in `m`, or null for the zero
++/// mask (`@ctz(0)` = 64, out of u64 range -- see `bit`).
++pub fn lowestBit(m: Mask) ?WSId {
++    if (m == 0) return null;
++    return WSId.fromIndex(@ctz(m));
++}
+ 
+ const OrderList = bounded.BoundedList(WindowId, max_tiled_per_ws);
+ const MruList = bounded.BoundedList(WindowId, mru_capacity);
+@@ -70,9 +350,6 @@
+     mask: Mask,
+     anchor: BaseMode,
+     size_hints: SizeHints = .{},
+-    /// Cached workspace whose tiled_order holds this window (single-membership
+-    /// invariant); null when there is no tiled slot. See findHome.
+-    home_ws: ?WSId = null,
+     presence: Presence = .present,
+     /// Core covering intent: the workspace this window's coverage anchors to.
+     /// Set while the owning extension parks the window as covering the screen;
+@@ -120,18 +397,19 @@
+     _ = list.removeValue(win);
+ }
+ 
+-/// The workspace whose tiled_order holds win (single-membership invariant).
+-/// Uses the cached home_ws when available; falls back to scanning when null
+-/// (e.g. a freshly adopted window not yet home-assigned).
++/// The workspace whose tiled_order holds win (single-membership invariant), or
++/// null when no list holds it (floating, parked, or unmanaged). The lists ARE
++/// the answer: there is deliberately no cached copy to drift from them. The
++/// scan is at most max_workspaces x max_tiled_per_ws integer compares, run
++/// only on user actions.
+ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
+-    if (m.store.get(win)) |e| if (e.home_ws) |h| return h;
+     var found: ?WSId = null;
+     for (0..m.ws.len) |i| {
+         if (m.ws[i].tiled_order.indexOfScalar(win) == null) continue;
+-        // The scan fallback only answers correctly under single membership:
+-        // two lists holding the window means the invariant broke upstream, and
+-        // returning the first hit would hand a plausible-looking wrong answer.
+-        // Trip loudly in Debug (folded out of Release).
++        // The scan only answers correctly under single membership: two lists
++        // holding the window means the invariant broke upstream, and returning
++        // one of them would hand a plausible-looking wrong answer. Trip loudly
++        // in Debug (folded out of Release).
+         if (builtin.mode == .Debug) {
+             if (found) |prev| std.debug.panic(
+                 "findHome: window 0x{x} listed on workspaces {d} and {d} (single-membership violated)",
+@@ -145,15 +423,14 @@
+ 
+ /// First-violation form of the single-writer membership invariant (P1-31).
+ /// Exactly one workspace list may hold a window whose `anchor` is `.tiled` and
+-/// `presence` is `.present`; that list must be the one its cached `home_ws`
+-/// names; and every id listed on any workspace must still exist in the store.
++/// `presence` is `.present`, and every id listed on any workspace must still
++/// exist in the store.
+ /// Floating and parked windows are home-free by design. Returns the violation
+ /// instead of panicking so a test can trip the exact logic
+ /// `debugCheckInvariants` asserts with.
+ pub const InvariantViolation = error{
+     StrandedWindow,
+     DuplicateMembership,
+-    StaleHomeWs,
+     OrphanedListEntry,
+ };
+ 
+@@ -162,19 +439,11 @@
+         const it = m.store.at(i);
+         if (it.val.anchor != .tiled or it.val.presence != .present) continue;
+         var homes: usize = 0;
+-        var actual_home: WSId = undefined;
+-        for (&m.ws, 0..) |*s, wi| {
+-            if (s.tiled_order.indexOfScalar(it.key) != null) {
+-                homes += 1;
+-                actual_home = WSId.fromIndex(wi);
+-            }
++        for (&m.ws) |*s| {
++            if (s.tiled_order.indexOfScalar(it.key) != null) homes += 1;
+         }
+         if (homes == 0) return error.StrandedWindow;
+         if (homes > 1) return error.DuplicateMembership;
+-        // A missing home_ws on a listed window is stale too: the list IS the
+-        // home, so the cache failed to record it.
+-        const home = it.val.home_ws orelse return error.StaleHomeWs;
+-        if (home.index != actual_home.index) return error.StaleHomeWs;
+     }
+     for (&m.ws) |*s| {
+         for (s.tiled_order.constSlice()) |w| {
+@@ -199,9 +468,8 @@
+ /// floating anchor from `rect` and drops the home-list membership. `rect` is
+ /// the window's last-sent (on-screen) geometry; model stays ledger-free.
+ pub fn detachTiledToFloating(m: *Model, e: *Entry, win: WindowId, rect: Rect) void {
+-    if (e.home_ws) |home| removeValue(&m.ws[home.index].tiled_order, win);
++    if (findHome(m, win)) |home| removeValue(&m.ws[home.index].tiled_order, win);
+     e.anchor = .{ .floating = rect };
+-    e.home_ws = null; // no longer in tiled_order
+ }
+ 
+ pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/core/process/session.zig b/src/core/process/session.zig
+--- a/src/core/process/session.zig	2026-10-26 00:49:53.950005738 +0000
++++ b/src/core/process/session.zig	2026-10-26 00:49:53.969395700 +0000
+@@ -190,7 +190,7 @@
+     errdefer snap.deinit();
+ 
+     // WindowRecord carries only the Entry fields that survive a re-exec
+-    // (mask + mode); size_hints and home_ws are rebuilt by registration.
++    // (mask + mode); size_hints is rebuilt by registration.
+     var widx: usize = 0;
+     var it = m.store.iterator();
+     while (it.next()) |item| : (widx += 1) {
+@@ -402,6 +402,20 @@
+     }
+ }
+ 
++/// Enforces single membership at the file boundary: a window already seated on
++/// an earlier workspace keeps that seat; later duplicates (a corrupt or
++/// hand-edited handoff file) are dropped, so `model.findHome` stays truthful.
++fn dropAlreadyListed(list: anytype, earlier: []const model.WsState) void {
++    var i: usize = 0;
++    while (i < list.len) {
++        const w = list.constSlice()[i];
++        const dup = for (earlier) |*ws| {
++            if (ws.tiled_order.indexOfScalar(w) != null) break true;
++        } else false;
++        if (dup) list.orderedRemove(i) else i += 1;
++    }
++}
++
+ /// Restores model-level fields: current/focused/all_view, per-workspace
+ /// params, tiled_order and focus_mru (pruned to registered windows). Call
+ /// AFTER the adoption phase registered the surviving windows. No feature
+@@ -459,6 +473,7 @@
+             s.params.variant_idx = 0;
+         }
+         restoreMembers(&s.tiled_order, r.tiled, m, model.max_tiled_per_ws);
++        dropAlreadyListed(&s.tiled_order, m.ws[0..i]);
+         restoreMembers(&s.focus_mru, r.mru, m, model.mru_capacity);
+     }
+ 
+@@ -472,9 +487,11 @@
+     while (it.next()) |row| {
+         const e = row.val;
+         if (e.anchor != .tiled) continue;
+-        const home = e.home_ws orelse continue;
+-        if (m.ws[home.index].tiled_order.indexOfScalar(row.key) != null) continue;
+-        if (m.ws[home.index].tiled_order.len >= model.max_tiled_per_ws) continue;
+-        _ = m.ws[home.index].tiled_order.append(row.key);
++        if (model.findHome(m, row.key) != null) continue;
++        // Seat it where the user is looking when it is tagged there, else on
++        // its lowest tagged workspace (same policy as minimize's restore).
++        const seat = (if (model.taggedOn(e.*, m.current)) m.current else model.lowestBit(e.mask)) orelse continue;
++        if (m.ws[seat.index].tiled_order.len >= model.max_tiled_per_ws) continue;
++        _ = m.ws[seat.index].tiled_order.append(row.key);
+     }
+ }
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/core/model_test.zig b/src/test/core/model_test.zig
+--- a/src/test/core/model_test.zig	2026-10-26 00:49:53.947651390 +0000
++++ b/src/test/core/model_test.zig	2026-10-26 00:49:53.966337657 +0000
+@@ -117,7 +117,7 @@
+     try assertSingleMembership(&m);
+ }
+ 
+-test "checkInvariants reports stranded, duplicated, stale and orphaned membership" {
++test "checkInvariants reports stranded, duplicated and orphaned membership" {
+     // Stranded: a present tiled window evicted from every workspace list.
+     var m = makeModel();
+     regCur(&m, 1);
+@@ -130,12 +130,6 @@
+     try testing.expect(d.ws[1].tiled_order.append(1));
+     try testing.expectError(error.DuplicateMembership, model.checkInvariants(&d));
+ 
+-    // Stale: the window sits on workspace 0 but home_ws names workspace 1.
+-    var s = makeModel();
+-    regCur(&s, 1);
+-    s.store.getPtr(1).?.home_ws = WSId.fromIndex(1);
+-    try testing.expectError(error.StaleHomeWs, model.checkInvariants(&s));
+-
+     // Orphaned: an id listed on a workspace that has no store entry.
+     var o = makeModel();
+     regCur(&o, 1);
+@@ -897,79 +891,52 @@
+     try testing.expect(!eqModel(&a, &c));
+ }
+ 
+-test "home_ws: register sets cache to current workspace" {
++test "findHome: register seats the window on the current workspace" {
+     var m = makeModel();
+     regCur(&m, 1); // register on workspace 0
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
++    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
+ }
+ 
+-test "home_ws: register on non-zero workspace" {
++test "findHome: register on non-zero workspace" {
+     var m = makeModel();
+     try window_state_ops.register(&m, 1, WSId.fromIndex(3));
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), m.store.get(1).?.home_ws);
+-}
+-
+-test "home_ws: findHome uses cache" {
+-    var m = makeModel();
+-    regCur(&m, 1);
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+-    // findHome reads the cached home.
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
++    try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), model.findHome(&m, 1));
+ }
+ 
+-test "home_ws: findHome scan fallback when cache is null" {
++test "findHome: unmanaged window has no home" {
+     var m = makeModel();
+-    regCur(&m, 1);
+-    // A null cache simulates an entry with no recorded home.
+-    m.store.getPtr(1).?.home_ws = null;
+-    // findHome scans tiled_order and recovers the correct home.
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
++    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 99));
+ }
+ 
+-test "home_ws: minimize clears cache" {
++test "findHome: minimize drops the home, restore re-seats it" {
+     var m = makeModel();
+     try minimize.init();
+     defer minimize.deinit();
+     regCur(&m, 1);
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+     try minimize.minimize(&m, 1);
+-    try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
++    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 1));
+     try testing.expect(m.store.get(1).?.presence == .parked);
+-}
+-
+-test "home_ws: restore sets cache after re-add" {
+-    var m = makeModel();
+-    try minimize.init();
+-    defer minimize.deinit();
+-    regCur(&m, 1);
+-    try minimize.minimize(&m, 1);
+-    try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
+     minimize.restore(&m, 1);
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
++    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.findHome(&m, 1));
+     try testing.expect(m.store.get(1).?.presence == .present);
+ }
+ 
+-test "home_ws: moveWindowToWs uses cache" {
++test "findHome: moveWindowToWs follows the window" {
+     var m = makeModel();
+     regCur(&m, 1);
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+-    // moveWindowToWs reads the cached home rather than scanning.
+     workspaces.moveWindowToWs(&m, 1, WSId.fromIndex(5));
+-    // home_ws tracks the original home, not the current workspace, so it
+-    // stays 0 while the window lands on workspace 5.
++    try testing.expectEqual(@as(?WSId, WSId.fromIndex(5)), model.findHome(&m, 1));
+     try expectOrder(&m, WSId.fromIndex(5), &.{1});
++    try expectOrder(&m, WSId.fromIndex(0), &.{});
+ }
+ 
+-test "home_ws: detachToFloating clears cache" {
++test "findHome: detachTiledToFloating drops the home" {
+     var m = makeModel();
+     regCur(&m, 1);
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
+-    // The window-layer detach path clears home_ws; verify the result state
+-    // (a floating entry carries null home_ws).
+     const e = m.store.getPtr(1).?;
+-    e.anchor = .{ .floating = .{ .x = 0, .y = 0, .width = 100, .height = 100 } };
+-    e.home_ws = null;
+-    try testing.expectEqual(@as(?WSId, null), e.home_ws);
++    model.detachTiledToFloating(&m, e, 1, .{ .x = 0, .y = 0, .width = 100, .height = 100 });
++    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 1));
++    try expectOrder(&m, WSId.fromIndex(0), &.{});
+ }
+ 
+ // adjustPrimaryWidth clamps to [0.05, 0.95].
+@@ -1068,7 +1035,7 @@
+     minimize.restore(&m, 30);
+     try expectOrder(&m, WSId.fromIndex(2), &.{30});
+     try expectOrder(&m, WSId.fromIndex(0), &.{31});
+-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), m.store.get(30).?.home_ws);
++    try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), model.findHome(&m, 30));
+     try testing.expect(!minimize.isMinimized(&m, 30));
+     try assertSingleMembership(&m);
+ }
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/core/perf_test.zig b/src/test/core/perf_test.zig
+--- a/src/test/core/perf_test.zig	2026-10-26 00:49:53.947598259 +0000
++++ b/src/test/core/perf_test.zig	2026-10-26 00:49:53.966269888 +0000
+@@ -75,8 +75,7 @@
+         helpers.benchLog("[bench] findHome (100 wins, 10 workspaces): {d:.1} ns/call\n", .{per_call_ns});
+ 
+     for (0..100) |i| {
+-        const e = m.store.get(@intCast(i + 1)).?;
+-        try testing.expect(e.home_ws != null);
++        try testing.expect(model.findHome(&m, @intCast(i + 1)) != null);
+     }
+ }
+ 
+@@ -287,7 +286,7 @@
+         );
+ }
+ 
+-test "bench: register (50 wins, home_ws cache setup)" {
++test "bench: register (50 wins)" {
+     const iterations: usize = if (bench) 10_000 else 1;
+     const t0 = nowNs();
+     for (0..iterations) |_| {
+@@ -299,7 +298,7 @@
+     if (bench) helpers.benchLog("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
+ 
+     // Window-count shape behind the bench's name: a fresh fill leaves every
+-    // id findable with its home-workspace cache set.
++    // id findable on a workspace.
+     var filled = makeModel();
+     try fill(&filled, 50);
+     for (0..50) |i| {
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/actions_test.zig b/src/test/window/actions_test.zig
+--- a/src/test/window/actions_test.zig	2026-10-26 00:49:53.947310350 +0000
++++ b/src/test/window/actions_test.zig	2026-10-26 00:49:53.965923425 +0000
+@@ -68,7 +68,7 @@
+     try std.testing.expectEqual(rect.y, e.anchor.floating.y);
+     try std.testing.expectEqual(rect.width, e.anchor.floating.width);
+     try std.testing.expectEqual(rect.height, e.anchor.floating.height);
+-    try std.testing.expectEqual(@as(?model.WSId, null), e.home_ws);
++    try std.testing.expectEqual(@as(?model.WSId, null), model.findHome(m, win));
+     try std.testing.expectEqual(@as(usize, 0), model.tiledCountOnWs(m, m.current));
+ 
+     const g = fx.geometry(win) orelse return error.ClosedWindow;
+@@ -94,7 +94,7 @@
+ 
+     const e = m.store.get(win) orelse return error.UnknownWindow;
+     try std.testing.expectEqual(model.bit(model.WSId.fromIndex(2)), e.mask);
+-    try std.testing.expectEqual(model.WSId.fromIndex(2), e.home_ws.?);
++    try std.testing.expectEqual(model.WSId.fromIndex(2), model.findHome(m, win).?);
+     try std.testing.expect(!model.visibleOn(m, win, m.current));
+     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
+     try fx.expectParked(win);
+@@ -218,7 +218,7 @@
+     fx.flush();
+     const e1 = m.store.get(win) orelse return error.UnknownWindow;
+     try std.testing.expect(e1.anchor == .floating);
+-    try std.testing.expect(e1.home_ws == null);
++    try std.testing.expect(model.findHome(m, win) == null);
+     const g1 = fx.geometry(win) orelse return error.ClosedWindow;
+     try std.testing.expectEqual(before.x, g1.x);
+     try std.testing.expectEqual(before.width, g1.width);
+@@ -230,7 +230,7 @@
+     try std.testing.expect(e2.anchor == .tiled);
+     // The detach removed the tiled_order membership for real; re-entry
+     // re-adds it (repairStrandedHome), so the window is a tiled member again.
+-    try std.testing.expect(e2.home_ws != null);
++    try std.testing.expect(model.findHome(m, win) != null);
+     try std.testing.expectEqual(@as(usize, 1), model.tiledCountOnWs(m, m.current));
+     try fx.expectTiledGeometry(win); // back on the tiling grid
+ }
+@@ -268,7 +268,7 @@
+     // w2 is floating and out of the pile.
+     const e2 = m.store.get(w2) orelse return error.UnknownWindow;
+     try std.testing.expect(e2.anchor == .floating);
+-    try std.testing.expectEqual(@as(?model.WSId, null), e2.home_ws);
++    try std.testing.expectEqual(@as(?model.WSId, null), model.findHome(m, w2));
+     try std.testing.expectEqual(@as(usize, 2), model.tiledCountOnWs(m, m.current));
+ 
+     // NO GAP: w3 reflowed off the pile into the freed slot (server truth =
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/admission_test.zig b/src/test/window/admission_test.zig
+--- a/src/test/window/admission_test.zig	2026-10-26 00:49:53.947204692 +0000
++++ b/src/test/window/admission_test.zig	2026-10-26 00:49:53.965838821 +0000
+@@ -222,7 +222,7 @@
+     var m = helpers.makeModel();
+     try window_state_ops.register(&m, 10, model.WSId.fromIndex(2));
+     try testing.expect(m.store.has(10));
+-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), m.store.get(10).?.home_ws);
++    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), model.findHome(&m, 10));
+     try testing.expect(m.ws[2].tiled_order.indexOfScalar(10) != null);
+     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
+ 
+@@ -231,7 +231,7 @@
+     try window_state_ops.register(&m, 10, model.WSId.fromIndex(3));
+     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
+     try testing.expectEqual(@as(usize, 0), m.ws[3].tiled_order.len);
+-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), m.store.get(10).?.home_ws);
++    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), model.findHome(&m, 10));
+ }
+ 
+ test "admission unregister: the whole-model scrub clears stale lists and focus" {
+@@ -239,7 +239,7 @@
+     try window_state_ops.register(&m, 10, model.WSId.fromIndex(0));
+     // Plant the id where it must NOT survive: another workspace's membership
+     // lists (the stale-left-behind case the whole-model scan exists for --
+-    // a home_ws-only removal would leave ws3 feeding a dead id to layout)
++    // a one-list removal would leave ws3 feeding a dead id to layout)
+     // and the focus stack.
+     try testing.expect(m.ws[3].tiled_order.append(10));
+     try testing.expect(m.ws[3].focus_mru.append(10));
+@@ -286,11 +286,11 @@
+     try testing.expect(e.anchor == .tiled);
+     // tiled: register's home hint stands; membership lists are rebuilt by
+     // session.applyModelLevel afterwards (F10), never by this pass.
+-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(1)), e.home_ws);
++    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(1)), model.findHome(&m, 21));
+     try testing.expect(e.presence == .present);
+ }
+ 
+-test "admission applyRestoredRecord: a floating record takes the rect and drops home_ws" {
++test "admission applyRestoredRecord: a floating record takes the rect and drops its tiled slot" {
+     var m = helpers.makeModel();
+     try window_state_ops.register(&m, 22, null);
+     const rect = model.Rect{ .x = 10, .y = 20, .width = 300, .height = 200 };
+@@ -304,8 +304,8 @@
+     try testing.expect(e.anchor == .floating);
+     try testing.expectEqual(rect, e.anchor.floating);
+     // A floating window has no tiled slot -- the same detach toggleFloating
+-    // performs; list surgery itself belongs to applyModelLevel's rebuild.
+-    try testing.expectEqual(@as(?model.WSId, null), e.home_ws);
++    // performs.
++    try testing.expectEqual(@as(?model.WSId, null), model.findHome(&m, 22));
+     try testing.expectEqual(rec.mask, e.mask);
+ }
+ 
+@@ -339,7 +339,7 @@
+     try testing.expect(minimize.isMinimized(&m2, 23));
+     const e = m2.store.get(23).?;
+     try testing.expect(e.presence == .parked);
+-    try testing.expectEqual(@as(?model.WSId, null), e.home_ws); // parkEntry clears home
++    try testing.expectEqual(@as(?model.WSId, null), model.findHome(&m2, 23)); // parked: no home
+     try testing.expect(m2.ws[0].tiled_order.indexOfScalar(23) == null); // slot dropped
+ }
+ 
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/borders_pure_test.zig b/src/test/window/borders_pure_test.zig
+--- a/src/test/window/borders_pure_test.zig	2026-10-26 00:49:53.947325142 +0000
++++ b/src/test/window/borders_pure_test.zig	2026-10-26 00:49:53.965971697 +0000
+@@ -41,10 +41,8 @@
+ }
+ 
+ /// Detaches `win` from every tiled slot so findHome returns null (the
+-/// "stray" shape: no home_ws cache, no tiled_order membership).
++/// "stray" shape: no tiled_order membership).
+ fn detach(m: *model.Model, win: model.WindowId) void {
+-    const e = m.store.getPtr(win).?;
+-    e.home_ws = null;
+     for (0..m.ws.len) |i| {
+         model.removeValue(&m.ws[i].tiled_order, win);
+     }
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/fullscreen_test.zig b/src/test/window/fullscreen_test.zig
+--- a/src/test/window/fullscreen_test.zig	2026-10-26 00:49:53.947361556 +0000
++++ b/src/test/window/fullscreen_test.zig	2026-10-26 00:49:53.966021349 +0000
+@@ -37,35 +37,10 @@
+ const expectOrder = helpers.expectOrder;
+ const addFloating = helpers.addFloating;
+ 
+-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
+-/// list; every listed id exists in the store (single-membership invariant).
+-/// Floating and parked (minimized) windows are home-free.
++/// Single-membership invariant (see `model.checkInvariants`): every tiled,
++/// present window sits in EXACTLY ONE workspace list, and every listed id exists.
+ fn assertSingleMembership(m: *const Model) !void {
+-    for (0..m.store.count()) |i| {
+-        const it = m.store.at(i);
+-        // A parked window keeps its anchor but has no tiled slot by design.
+-        const tiled = (it.val.anchor == .tiled and it.val.presence == .present);
+-        if (!tiled) continue;
+-        var homes: usize = 0;
+-        var actual_home: WSId = undefined;
+-        for (&m.ws, 0..) |*s, wi| {
+-            if (s.tiled_order.indexOfScalar(it.key) != null) {
+-                homes += 1;
+-                actual_home = WSId.fromIndex(wi);
+-            }
+-        }
+-        try testing.expectEqual(@as(usize, 1), homes);
+-        // The cached home_ws must name the workspace that ACTUALLY holds
+-        // the window. The single-membership count above only proves exactly
+-        // one list mentions it; a stale home_ws pointing elsewhere is the
+-        // "stranded home" bug, and the count check cannot see it.
+-        try testing.expectEqual(actual_home, it.val.home_ws);
+-    }
+-    for (&m.ws) |*s| {
+-        for (s.tiled_order.constSlice()) |w| {
+-            try testing.expect(m.store.has(w));
+-        }
+-    }
++    try model.checkInvariants(m);
+ }
+ 
+ // toggleFullscreen round trips; minimize-from-fullscreen keeps its
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/minimize_test.zig b/src/test/window/minimize_test.zig
+--- a/src/test/window/minimize_test.zig	2026-10-26 00:49:53.947220760 +0000
++++ b/src/test/window/minimize_test.zig	2026-10-26 00:49:53.965854537 +0000
+@@ -47,35 +47,10 @@
+ const addFloating = helpers.addFloating;
+ const registerRange = helpers.registerRange;
+ 
+-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
+-/// list; every listed id exists in the store (single-membership invariant).
+-/// Floating and parked (minimized) windows are home-free.
++/// Single-membership invariant (see `model.checkInvariants`): every tiled,
++/// present window sits in EXACTLY ONE workspace list, and every listed id exists.
+ fn assertSingleMembership(m: *const Model) !void {
+-    for (0..m.store.count()) |i| {
+-        const it = m.store.at(i);
+-        // A parked window keeps its anchor but has no tiled slot by design.
+-        const tiled = (it.val.anchor == .tiled and it.val.presence == .present);
+-        if (!tiled) continue;
+-        var homes: usize = 0;
+-        var actual_home: WSId = undefined;
+-        for (&m.ws, 0..) |*s, wi| {
+-            if (s.tiled_order.indexOfScalar(it.key) != null) {
+-                homes += 1;
+-                actual_home = WSId.fromIndex(wi);
+-            }
+-        }
+-        try testing.expectEqual(@as(usize, 1), homes);
+-        // The cached home_ws must name the workspace that ACTUALLY holds
+-        // the window. The single-membership count above only proves exactly
+-        // one list mentions it; a stale home_ws pointing elsewhere is the
+-        // "stranded home" bug, and the count check cannot see it.
+-        try testing.expectEqual(actual_home, it.val.home_ws);
+-    }
+-    for (&m.ws) |*s| {
+-        for (s.tiled_order.constSlice()) |w| {
+-            try testing.expect(m.store.has(w));
+-        }
+-    }
++    try model.checkInvariants(m);
+ }
+ 
+ // minimize tiled -> parked, removed from tiled_order; capacity refuses
+@@ -97,7 +72,7 @@
+     minimize.restore(&m, 102);
+     try expectOrder(&m, WSId.fromIndex(0), &wins);
+     try minimize.minimize(&m, 102);
+-    try testing.expectEqual(@as(?WSId, null), e.home_ws);
++    try testing.expectEqual(@as(?WSId, null), model.findHome(&m, 102));
+     var expected: [max_minimized]WindowId = undefined;
+     _ = std.mem.replace(WindowId, &wins, &.{102}, &.{}, expected[0 .. wins.len - 1]);
+     try expectOrder(&m, WSId.fromIndex(0), expected[0 .. wins.len - 1]);
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/test/window/workspaces_test.zig b/src/test/window/workspaces_test.zig
+--- a/src/test/window/workspaces_test.zig	2026-10-26 00:49:53.947266093 +0000
++++ b/src/test/window/workspaces_test.zig	2026-10-26 00:49:53.965878969 +0000
+@@ -21,7 +21,7 @@
+ 
+ const max_ws = model.max_workspaces;
+ 
+-test "moveWindowToWs relocates mask, home_ws, and tiled membership" {
++test "moveWindowToWs relocates mask, home, and tiled membership" {
+     var m = helpers.makeModel();
+     helpers.regCur(&m, 101); // home workspace 0
+     try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&m, 101).?);
+@@ -30,7 +30,6 @@
+ 
+     const e = m.store.get(101).?;
+     try testing.expectEqual(model.bit(model.WSId.fromIndex(2)), e.mask);
+-    try testing.expectEqual(@as(?model.WSId, model.WSId.fromIndex(2)), e.home_ws);
+     try testing.expectEqual(model.WSId.fromIndex(2), model.findHome(&m, 101).?);
+     try testing.expectEqual(@as(usize, 1), m.ws[2].tiled_order.len);
+     try testing.expectEqual(@as(usize, 0), m.ws[0].tiled_order.len);
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/admission.zig b/src/window/admission.zig
+--- a/src/window/admission.zig	2026-10-26 00:49:53.948226309 +0000
++++ b/src/window/admission.zig	2026-10-26 00:49:53.967734710 +0000
+@@ -491,7 +491,7 @@
+ /// `float_rect` admits the window already floating: the entry is registered
+ /// tiled (core membership is tiled-only) and then immediately detached to the
+ /// given rect with no home-list membership, mirroring detachTiledToFloating's
+-/// anchor/home_ws state. The reconcile tail then sizes it floating in one
++/// anchor state. The reconcile tail then sizes it floating in one
+ /// reconcile, so a float-rule spawn never flashes a tiled slot.
+ ///
+ /// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
+@@ -559,7 +559,7 @@
+ 
+     // Float-rule admission: detach the entry from its tiled slot before the
+     // fifo placement runs (which assumes a home slot, nonsensical for a
+-    // floating window). The anchor/home_ws state mirrors toggleFloating's
++    // floating window). The anchor state mirrors toggleFloating's
+     // detach, and the reconcile tail applies the rect in the same reconcile.
+     if (float_rect) |rect| {
+         if (e) |ep| model_mod.detachTiledToFloating(m, ep, win, rect);
+@@ -737,13 +737,10 @@
+ 
+     switch (record.anchor) {
+         .tiled => {},
+-        .floating => |rect| {
+-            // Mirror toggleFloating's floating storage: anchor + home_ws null
+-            // (a floating window has no tiled slot). The caller's reconcile
+-            // sizes the window from this rect.
+-            e.anchor = .{ .floating = rect };
+-            e.home_ws = null;
+-        },
++        // The same detach toggleFloating performs: the anchor carries the rect
++        // and the window leaves its tiled slot. The caller's reconcile sizes
++        // the window from this rect.
++        .floating => |rect| model_mod.detachTiledToFloating(m, e, win, rect),
+     }
+ 
+     // Presence that was non-present at save time is re-asserted through the
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/modules/floating.zig b/src/window/modules/floating.zig
+--- a/src/window/modules/floating.zig	2026-10-26 00:49:53.948253285 +0000
++++ b/src/window/modules/floating.zig	2026-10-26 00:49:53.967765431 +0000
+@@ -786,11 +786,9 @@
+ fn repairStrandedHome(m: *model.Model, e: *model.Entry, win: model.WindowId) bool {
+     if (model.findHome(m, win) != null) return true;
+     if (model.lowestBit(e.mask)) |h| {
+-        // Commit home_ws only when the seat got an entry, and report
+-        // failure so the caller can revert the anchor -- committing anyway
+-        // would strand the window anchored-tiled with no seat.
++        // Report a full list so the caller can revert the anchor --
++        // carrying on would strand the window anchored-tiled with no seat.
+         if (!m.ws[h.index].tiled_order.append(win)) return false;
+-        e.home_ws = h;
+     }
+     return true;
+ }
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/modules/minimize.zig b/src/window/modules/minimize.zig
+--- a/src/window/modules/minimize.zig	2026-10-26 00:49:53.948303711 +0000
++++ b/src/window/modules/minimize.zig	2026-10-26 00:49:53.967815517 +0000
+@@ -91,10 +91,6 @@
+         model.removeValue(&m.ws[h.index].tiled_order, win);
+         origin.* = h;
+     }
+-    // Clear the cached home for every anchor: a parked window is in no
+-    // tiled_order, and keeping its home fed parked windows into a
+-    // destination tiled_order on move/tag.
+-    e.home_ws = null;
+     e.presence = .parked; // mode stays unchanged (base/fullscreen)
+     return slot;
+ }
+@@ -134,9 +130,6 @@
+                 }
+             }
+         }
+-        e.home_ws = h;
+-    } else {
+-        e.home_ws = null; // floating restores, stays home-free
+     }
+     // Restore the presence pattern: a fullscreen-carrying window goes back
+     // into covering (its `covering_ws` intent was preserved through the
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/modules/workspaces.zig b/src/window/modules/workspaces.zig
+--- a/src/window/modules/workspaces.zig	2026-10-26 00:49:53.948272705 +0000
++++ b/src/window/modules/workspaces.zig	2026-10-26 00:49:53.967782275 +0000
+@@ -37,23 +37,19 @@
+     if (!ws.isValid()) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
+     if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
+ 
++    // Only a window that holds a tiled seat has a list to move between;
++    // floating and parked windows just retag.
++    const home = model.findHome(m, win);
++    const relist = if (home) |h| !h.eql(ws) else false;
++
+     // Refuse-before-mutate: full destination list cancels the move.
+-    const to_new_ws = if (e.home_ws) |hw| !hw.eql(ws) else true;
+-    if (e.home_ws != null and to_new_ws and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
++    if (relist and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
+ 
+     transferFullscreenOnMove(m, win, ws);
+     e.mask = model.bit(ws);
+-    if (e.home_ws) |old_h| {
+-        if (to_new_ws) {
+-            // Only a tiled-anchor window lives in a tiled_order. A floating-
+-            // anchored window can carry a stale home_ws (register seeds it),
+-            // but appending it there would make a layout seat it cannot fill.
+-            if (e.anchor == .tiled) {
+-                model.removeValue(&m.ws[old_h.index].tiled_order, win);
+-                _ = m.ws[ws.index].tiled_order.append(win);
+-            }
+-            e.home_ws = ws;
+-        }
++    if (relist) {
++        model.removeValue(&m.ws[home.?.index].tiled_order, win);
++        _ = m.ws[ws.index].tiled_order.append(win);
+     }
+ }
+ 
+@@ -109,20 +105,14 @@
+     }
+     // Removing the home tag must not strand the seat: the window can no
+     // longer be placed on its old home workspace, so its tiled_order entry
+-    // and home cache have to move to a surviving tag (or the seat drops and
+-    // reconcile parks the unplaced window). Leaving it would inflate the old
+-    // list's len and feed capacity refusals while the window never returns
+-    // to a layout.
+-    if (e.home_ws) |hw| {
++    // has to move to a surviving tag (or the seat drops and reconcile parks
++    // the unplaced window). Leaving it would inflate the old list's len and
++    // feed capacity refusals while the window never returns to a layout.
++    if (model.findHome(m, win)) |hw| {
+         if (hw.eql(ws)) {
+             model.removeValue(&m.ws[hw.index].tiled_order, win);
+-            e.home_ws = null;
+             if (e.anchor == .tiled) {
+-                if (model.lowestBit(e.mask)) |h| {
+-                    if (m.ws[h.index].tiled_order.append(win)) {
+-                        e.home_ws = h;
+-                    }
+-                }
++                if (model.lowestBit(e.mask)) |h| _ = m.ws[h.index].tiled_order.append(win);
+             }
+         }
+     }
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/protocol/focus.zig b/src/window/protocol/focus.zig
+--- a/src/window/protocol/focus.zig	2026-10-26 00:49:53.948059428 +0000
++++ b/src/window/protocol/focus.zig	2026-10-26 00:49:53.967573094 +0000
+@@ -85,34 +85,28 @@
+     warned_focus_steal: bool = false,
+ };
+ 
+-// PATTERN: module-global state with explicit init/deinit lifecycle (called
+-// from main.zig); avoids allocator threading through every function call.
+-// All functions operate on `state` directly rather than passing it as a
+-// parameter.
+-var state: ?State = null;
++// Module-global state (one focus context per process), reset by init()/deinit()
++// so a deinit()+init() cycle starts clean.
++var state: State = .{};
+ 
+ pub fn init() void {
+-    // Reset every field so a deinit()+init() cycle starts from a clean slate.
+     state = .{};
+-    state.?.net_active_window = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
++    state.net_active_window = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
+ }
+ 
+ pub fn deinit() void {
+-    // Discard pending cookies so they don't accumulate across a deinit()+init()
+-    // cycle; at process exit the connection close handles this implicitly.
+-    // Guarded by `if (state)` instead of unwrapping: deinit is idempotent
+-    // (P1-40) -- a second call, or one before the first init, never reaches
+-    // the connection at all.
+-    if (state) |*s| icccm.discardProtocolCookie(core.getState().conn, s.tiling_op_cookie);
+-    state = null;
++    // Discard a pending cookie so it doesn't accumulate across a deinit()+init()
++    // cycle. Idempotent (P1-40): with no cookie pending, a second call, or one
++    // before the first init, never reaches the connection.
++    if (state.tiling_op_cookie != null) icccm.discardProtocolCookie(core.getState().conn, state.tiling_op_cookie);
++    state = .{};
+ }
+ 
+-/// Focus-property cache + ICCCM 4.1.7 input-model resolution: the per-window
+-/// WM_HINTS/WM_PROTOCOLS verdict cache, the four delivery modes,
+-/// WM_TAKE_FOCUS dispatch from a known advertisement, and the PropertyNotify
+-/// half-refresh. The X11 query machinery (fire/drain/populate) stays in
+-/// icccm.zig and writes through put() below, so the cache has exactly one
+-/// owner — this module.
++// Focus-property cache + ICCCM 4.1.7 input-model resolution: the per-window
++// WM_HINTS/WM_PROTOCOLS verdict cache, WM_TAKE_FOCUS dispatch, and the
++// PropertyNotify half-refresh. The X11 query machinery lives in icccm.zig and
++// writes through put() below, so the cache has exactly one owner: this module.
++
+ /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
+ /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
+ pub const InputModel = enum {
+@@ -289,23 +283,20 @@
+ 
+ // Query API (pure reads)
+ 
+-/// Focus truth: reads model.focused; falls back to the protocol
+-/// cache only before pipeline.init (boot).
++/// Focus truth: `model.focused` (null before the model exists).
+ pub inline fn getFocused() ?u32 {
+-    if (core.isModelReady()) {
+-        return pipeline.state().focused;
+-    }
+-    return state.?.last_applied;
++    if (!core.isModelReady()) return null;
++    return pipeline.state().focused;
+ }
+ 
+ pub inline fn getSuppressReason() core.FocusSuppressReason {
+-    return state.?.suppress_reason;
++    return state.suppress_reason;
+ }
+ 
+ /// Pointer root position snapshot (see State.spawn_cursor). Read by the
+ /// window module's spawn-crossing suppression.
+ pub fn spawnCursor() SpawnCursor {
+-    return state.?.spawn_cursor;
++    return state.spawn_cursor;
+ }
+ 
+ /// Snapshot the pointer's root position for spawn-crossing suppression.
+@@ -322,7 +313,7 @@
+     const reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, core.getState().root), null);
+     defer if (reply) |r| std.c.free(r);
+     if (reply) |r| {
+-        state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
++        state.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
+     }
+ }
+ 
+@@ -334,11 +325,11 @@
+ /// coordinates (the origin-parked predicate); any reason
+ /// that doesn't need coordinate disambiguation belongs here.
+ pub inline fn shouldSuppressEnterNotify() bool {
+-    return state.?.suppress_reason == .tiling_operation;
++    return state.suppress_reason == .tiling_operation;
+ }
+ 
+ pub inline fn getLastEventTime() u32 {
+-    return state.?.last_event_time;
++    return state.last_event_time;
+ }
+ 
+ // Mutation API (side effects)
+@@ -348,7 +339,7 @@
+ /// See "Timestamp handling" below for why focus.zig itself always uses
+ /// CurrentTime (0) rather than forwarding this value.
+ pub inline fn setLastEventTime(t: u32) void {
+-    state.?.last_event_time = t;
++    state.last_event_time = t;
+ }
+ 
+ // Timestamp handling
+@@ -377,7 +368,7 @@
+ /// cleared/set independently of any focus change (e.g. MotionNotify clearing
+ /// it when real pointer movement is detected).
+ pub inline fn setSuppressReason(r: core.FocusSuppressReason) void {
+-    state.?.suppress_reason = r;
++    state.suppress_reason = r;
+ }
+ 
+ // Button grab management
+@@ -468,26 +459,18 @@
+     new_suppress: core.FocusSuppressReason,
+ };
+ 
+-// Section 4: two-phase prepare (focus protocol + geometry land under one grab)
+-//
+-// Some actions need focus protocol + geometry to land under one server grab.
+-// The existing `setFocus`/`clearFocus` path does round trips (input-model
+-// resolve) that cannot run inside a grab. Split into two phases:
++// Section 4: two-phase prepare, so focus protocol + geometry land under one grab.
+ //
+-//   Phase 1 (outside grab): prepareFocus / prepareClearFocus
+-//     - Cache-only input-model resolve (a miss provisions dwm-style focus);
+-//       the only remaining round trip is the isWindowMapped liveness guard
+-//       used by mouse_click.
+-//     - Returns a FocusTransition descriptor (no X traffic)
++//   Phase 1 (outside the grab): prepareFocus / prepareClearFocus decide what
++//     to do from the focus-property cache (a miss provisions dwm-style focus;
++//     the one round trip left is mouse_click's liveness guard) and return a
++//     FocusTransition. No X traffic.
++//   Phase 2 (inside the grab): applyPendingFocus sends fire-and-forget XCB
++//     only (set_input_focus, button grabs, raise, WM_TAKE_FOCUS,
++//     _NET_ACTIVE_WINDOW). No round trips, no model writes.
+ //
+-//   Phase 2 (inside grab): applyPendingFocus
+-//     - Fire-and-forget XCB only: set_input_focus, grab_buttons, raise,
+-//       WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, bar dirty flag
+-//     - No round trips, no model updates
+-//
+-// The caller owns the model update (setFocus / clearFocus, defined below)
+-// and does it BEFORE the grab, so the model is consistent when the
+-// reconcile runs inside the grab.
++// The caller writes the model (setFocus / clearFocus) BEFORE the grab, so the
++// model is consistent when the reconcile runs inside it.
+ 
+ pub const SetFocusIntent = struct {
+     win: u32,
+@@ -585,20 +568,12 @@
+ 
+ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
+     if (getSuppressReason() != .window_spawn) return false;
+-    // The spawn snapshot (spawnCursor()) is taken by handleMapRequest
+-    // when the spawn's MapRequest arrives. Mapping a new window under the
+-    // stationary cursor produces a PAIR of synthetic crossings, both carrying
+-    // the spawn's root coordinates: the enter into the spawned window, and the
+-    // return crossing into the window it displaced (which, when the spawned
+-    // window immediately parks offscreen, is the previous focus). A one-shot
+-    // guard only drops the first, letting the return crossing re-steal focus
+-    // from the just-spawned window via mouse_enter.
+-    //
+-    // Keep the guard armed while crossings stay at the spawn pixel: only a
+-    // genuine pointer move (different coordinates) is a real hover and may
+-    // clear it. A cursor parked where it was when the app launched can't hover
+-    // a different window at that same pixel until it moves, which is the
+-    // acceptable price for not stealing focus during the spawn's layout.
++    // Mapping a new window under a stationary cursor yields a PAIR of
++    // synthetic crossings carrying the spawn's root coordinates (into the new
++    // window, then back into the one it displaced). A one-shot guard drops only
++    // the first, and the second would re-steal focus from the new window. So
++    // stay armed while crossings sit at the spawn pixel (snapshot taken by
++    // handleMapRequest); only a genuine pointer move clears it.
+     const cursor = spawnCursor();
+     if (root_x == cursor.x and root_y == cursor.y) return true;
+     setSuppressReason(.none);
+@@ -635,27 +610,16 @@
+     grabFocus(win, .mouse_enter);
+ }
+ 
+-/// The ONE destroyed-window guard for a focus target. False when `win`
+-/// may not take focus or be raised.
+-///
+-/// Four checks, in the order that stops the work soonest, and ONE place they
+-/// live:
+-///
+-///  1. the invalid-window sentinel (a chrome XID is not a window),
+-///  2. model liveness -- a destroyed window is unregistered, so `store.has`
+-///     is false. It applies to `.user_command` too: floating.zig reaches
+-///     grabFocus(win, .user_command) directly, so a window destroyed between
+-///     spawn and the float toggle must not be focused and raised.
+-///     It costs no round trip -- a load and a compare on a table the caller
+-///     already has open.
+-///  3. parked (minimized) state -- a hidden window must not take focus until
+-///     it is restored. This guards EVERY focus path, including direct
+-///     grabFocus callers that do not gate through canFocusReach first.
+-///  4. the blocking xcb_get_window_attributes liveness query, for the ONE
+-///     reason whose target liveness is not already known to be good from the
+-///     model: a mouse click lands on whatever is under the pointer, which may
+-///     be a window that is mapped-but-about-to-die. `last_applied` can still
+-///     name it, so re-focusing needs the live answer.
++/// The ONE guard for a focus target: false when `win` may not take focus or
++/// be raised. Checks, cheapest first:
++///  1. the invalid-window sentinel (a chrome XID is not a window);
++///  2. model liveness (`store.has`) -- applies to every reason, since
++///     floating.zig reaches grabFocus(.user_command) directly and the window
++///     may have died since;
++///  3. parked (minimized) windows never take focus, on any path;
++///  4. for mouse_click only, a live xcb_get_window_attributes query: the click
++///     lands on whatever is under the pointer, which may be mapped but dying,
++///     and `last_applied` can still name it.
+ fn resolveFocusTarget(win: u32, reason: Reason) bool {
+     if (query.isInvalidWindow(win)) return false;
+     const m = pipeline.state();
+@@ -692,9 +656,9 @@
+     // re-grab of that same window's buttons (a button-regrab flash).
+     const et = etiquetteFor(reason);
+     const raise = et.raise and !query.isTiledMode(win);
+-    const same_applied = state.?.last_applied == win;
++    const same_applied = state.last_applied == win;
+     if (same_applied and !raise) return .none;
+-    const old: ?u32 = if (same_applied) null else state.?.last_applied;
++    const old: ?u32 = if (same_applied) null else state.last_applied;
+     return .{ .set = .{
+         .win = win,
+         .old = old,
+@@ -702,7 +666,7 @@
+             .set_input_focus = et.force_set_input_focus or resolved.model != .globally_active,
+             .raise = raise,
+             .take_focus_known = resolved.take_focus,
+-            .new_suppress = et.suppress orelse state.?.suppress_reason,
++            .new_suppress = et.suppress orelse state.suppress_reason,
+         },
+     } };
+ }
+@@ -710,17 +674,13 @@
+ /// Phase 1: prepare a focus-clear transition (outside grab).
+ /// Returns .none when there is no focused window to clear.
+ ///
+-/// The clear target derives from the protocol cache (last_applied), and the
+-/// MODEL is the truth source for callers. A window teardown legitimately
+-/// clears model.focused while last_applied still holds the (now-removed)
+-/// window, so `model.focused == null` is a normal reason to clear, not a
+-/// divergence. Only a live model.focused that disagrees with last_applied is
+-/// worth a diagnostic; it still proceeds -- every clear caller nulls
+-/// model.focused right after, and skipping would strand X input focus on a
+-/// stale window the model no longer claims. Callers MUST run clearFocus
+-/// after this call.
++/// The clear target comes from `last_applied` (what X was last told), not the
++/// model: a window teardown legitimately nulls model.focused while X focus
++/// still names the removed window, and that must still be cleared. A live
++/// model.focused that disagrees with last_applied is logged but still cleared.
++/// Callers MUST run clearFocus after this call.
+ pub fn prepareClearFocus() FocusTransition {
+-    const applied = state.?.last_applied;
++    const applied = state.last_applied;
+     const focused = getFocused();
+ 
+     if (applied == null) return .none; // model-only focus (none) -- nothing applied to clear
+@@ -785,8 +745,8 @@
+ /// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
+ /// limb): drop applied focus, reset suppression, refocus root.
+ fn clearTail() void {
+-    state.?.last_applied = null;
+-    state.?.suppress_reason = .none;
++    state.last_applied = null;
++    state.suppress_reason = .none;
+     const cs = core.getState();
+     focusNow(cs.conn, cs.root);
+     core.focus.bump();
+@@ -798,8 +758,8 @@
+ pub fn applyPendingFocus(t: FocusTransition) void {
+     switch (t) {
+         .set => |intent| {
+-            state.?.last_applied = intent.win;
+-            state.?.suppress_reason = intent.flags.new_suppress;
++            state.last_applied = intent.win;
++            state.suppress_reason = intent.flags.new_suppress;
+ 
+             grabButtons(intent.win, true);
+             if (intent.old) |o| grabButtons(o, false);
+@@ -836,26 +796,15 @@
+     }
+ }
+ 
+-/// FocusIn reassert (P1-09 / D7).
+-///
+-/// FocusChange is selected on every managed window (masks.managed_window),
+-/// but nothing consumed the events: a client that calls XSetInputFocus on its
+-/// own toplevel (Electron, terminals, games -- legal, the server obeys) moved
+-/// the SERVER focus while model.focused, the border colors, and the root's
+-/// _NET_ACTIVE_WINDOW kept naming the old window until the next hover/click
+-/// happened to re-sync them.
+-///
+-/// The response REASSERTS the model's focus rather than adopting the steal:
+-/// the model is the single source of truth, and adopting would hand every
+-/// client a focus-steal primitive. The push-back goes through the existing
+-/// apply path (applyPendingFocus / clearTail) but bypasses prepareFocus's
+-/// dedup on purpose: the protocol cache still (correctly) says the model's
+-/// window holds applied focus, yet the server has moved behind our back, so
+-/// only a real set_input_focus restores it. Fire-and-forget -- safe from the
+-/// event loop -- and terminating: the FocusIn this generates carries the
+-/// model's window and drops out at the `m.focused == win` dedup below.
+-/// Warn-once per process (a looping stealer must not flood the log); init()'s
+-/// full State reset re-arms the latch.
++/// FocusIn reassert (P1-09 / D7): a client may call XSetInputFocus on its own
++/// toplevel (Electron, terminals, games), moving SERVER focus while
++/// model.focused, borders and _NET_ACTIVE_WINDOW still name the old window.
++/// We push the model's focus back rather than adopt the steal (adopting would
++/// hand every client a focus-steal primitive). The push bypasses prepareFocus's
++/// dedup on purpose: `last_applied` still says the model's window holds focus,
++/// but the server moved behind our back. Fire-and-forget, and terminating: the
++/// FocusIn it generates names the model's window and exits at the
++/// `m.focused == win` check. Warns once per process.
+ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
+     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
+     // The binding spells the target field `event`, not `window` (see the
+@@ -864,8 +813,8 @@
+     if (!query.isValidManagedWindow(win)) return;
+     const m = pipeline.state();
+     if (m.focused == win) return;
+-    if (!state.?.warned_focus_steal) {
+-        state.?.warned_focus_steal = true;
++    if (!state.warned_focus_steal) {
++        state.warned_focus_steal = true;
+         log.warn(
+             "focus: 0x{x} stole input focus (model.focused=0x{x}); reasserting",
+             .{ win, m.focused orelse xcb.XCB_WINDOW_NONE },
+@@ -897,7 +846,7 @@
+                 .set_input_focus = true,
+                 .raise = false,
+                 .take_focus_known = resolved.take_focus,
+-                .new_suppress = state.?.suppress_reason,
++                .new_suppress = state.suppress_reason,
+             },
+         } });
+     } else {
+@@ -916,9 +865,9 @@
+ /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
+ /// No-ops when the atom was not resolved at init time.
+ fn advertiseActiveWindow(win: u32) void {
+-    if (state.?.net_active_window == xcb.XCB_ATOM_NONE) return;
++    if (state.net_active_window == xcb.XCB_ATOM_NONE) return;
+     const cs = core.getState();
+-    _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
++    _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
+ }
+ 
+ // Section 6: settle (deferred "has the server caught up" round trip)
+@@ -929,9 +878,9 @@
+ /// focus to wherever the pointer ends up; it never calls setFocus itself. The
+ /// reflow's events precede this reply in XCB order.
+ pub fn beginTilingOpSettle() void {
+-    icccm.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
++    icccm.discardProtocolCookie(core.getState().conn, state.tiling_op_cookie);
+     const cs = core.getState();
+-    state.?.tiling_op_cookie = xcb.xcb_get_input_focus(cs.conn);
++    state.tiling_op_cookie = xcb.xcb_get_input_focus(cs.conn);
+ }
+ 
+ /// Drain the deferred tiling-op-settle reply, if one is pending, and lift
+@@ -940,12 +889,12 @@
+ /// Only clears suppression while it is still .tiling_operation, so a different
+ /// reason set meanwhile (e.g. window_spawn) is never clobbered.
+ pub fn drainTilingOpSettle() void {
+-    const cookie = state.?.tiling_op_cookie orelse return;
++    const cookie = state.tiling_op_cookie orelse return;
+     var reply: ?*anyopaque = null;
+     var err: ?*xcb.xcb_generic_error_t = null;
+     _ = xcb.xcb_poll_for_reply(core.getState().conn, cookie.sequence, &reply, &err);
+     if (reply == null and err == null) return; // still pending; cookie stays in flight
+-    state.?.tiling_op_cookie = null; // consumed either way
++    state.tiling_op_cookie = null; // consumed either way
+     if (err) |e| {
+         std.c.free(e);
+         return;
+@@ -955,19 +904,12 @@
+     // has processed everything queued before it. It must be consumed to drain
+     // the XCB queue.
+     std.c.free(reply.?);
+-    if (state.?.suppress_reason == .tiling_operation) state.?.suppress_reason = .none;
++    if (state.suppress_reason == .tiling_operation) state.suppress_reason = .none;
+ }
+ 
+-/// Grab-wrapped commit API + focus cycle: the two-phase protocol's atomic
+-/// commit wrappers, plus the cycle. The protocol itself (module state,
+-/// etiquette table, prepare/apply split, button grabs) lives above; this is
+-/// a sub-surface of it.
+-
+-// Grab-wrapped focus operations (full atomicity)
+-//
+-// These wrap the two-phase protocol (prepare + apply) in a server grab
+-// with a reconcile, ensuring focus, borders, and geometry all land
+-// atomically under one server grab.
++// Section 7: grab-wrapped commit API + focus cycle. These wrap prepare + apply
++// in one server grab with a reconcile, so focus, borders and geometry land
++// atomically.
+ 
+ /// Atomically focus `win` with `reason`. Focus protocol, borders, and geometry
+ /// land inside one server grab.
+@@ -1010,41 +952,23 @@
+     pipeline.reconcileGrabFocus(.{}, ft, .before, duty);
+ }
+ 
+-// Window focus cycling
+-//
+-// `cycleTarget` fills its OWN stack scratch (see below); there is deliberately
+-// no module-level buffer here. The cycle pool is not restricted to tiled slots
+-// (floating windows are admitted too), so the buffer is sized by the model
+-// store capacity rather than max_tiled_windows.
+-
+ /// Cycle focus one step, committing the viewport-snap duty in the SAME grab.
+-///
+-/// This is the coupled form: pool resolution and commit land together, so the
+-/// duty cannot be separated from the transition it belongs to. Resolve a
+-/// target and commit it separately with a different duty or none, and the snap
+-/// the cycle exists to fold in silently does not happen (one extra
+-/// grab-and-reconcile later, or not at all).
+-///
+-/// `cycleTarget` stays `pub` for the pure read; its other consumers are
+-/// assertions in the X-gated focus_test.
++/// Resolving a target and committing it separately would silently lose the
++/// snap the cycle exists to fold in. `cycleTarget` stays `pub` for the pure
++/// read (its other consumers are assertions in the X-gated focus_test).
+ pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
+     const target = cycleTarget(dir) orelse return;
+     grabFocusWithDuty(target, .user_command, duty);
+ }
+ 
+-/// Thin bind over `focus_select.cycleTarget`: supplies the live model and
+-/// current focus so the read stays a pure selection step. The pure form
+-/// (`focus_select.cycleTarget(m, focused, dir)`) is what tests exercise
+-/// without a live pipeline; this wrapper exists so the input path can resolve
+-/// a cycle step from real state without threading state through by hand.
++/// Binds `focus_select.cycleTarget` to the live model and current focus.
+ pub fn cycleTarget(dir: types.Dir) ?u32 {
+     return focus_select.cycleTarget(pipeline.state(), getFocused(), dir);
+ }
+ 
+-// Section: model focus operations (the focus protocol owns focus state
+-// transitions on the model). The selection logic itself lives pure in
+-// `window/state/focus_select.zig`; these are re-exports so the protocol
+-// surface and its callers keep one spelling for the writers.
++// Model focus operations: the selection logic lives pure in
++// `window/state/focus_select.zig`; these re-exports keep one spelling for
++// callers (~100 call sites, mostly tests).
+ 
+ /// Writes `win` as the model's focused window and moves it to the front of
+ /// the focus MRU. Unknown windows are ignored.
+diff -ruN '--exclude=.zig-cache' '--exclude=zig-out' -x harness -x build-support a/src/window/state/window_state_ops.zig b/src/window/state/window_state_ops.zig
+--- a/src/window/state/window_state_ops.zig	2026-10-26 00:49:53.948165587 +0000
++++ b/src/window/state/window_state_ops.zig	2026-10-26 00:49:53.967681380 +0000
+@@ -18,24 +18,20 @@
+     // on a config path) would index out of the model. Fail at the boundary
+     // that created the id, not silently on the array read below.
+     std.debug.assert(target.isValid());
+-    const ptr = m.store.put(win, .{ .mask = model.bit(target), .anchor = .tiled }) catch |e| return e;
++    _ = m.store.put(win, .{ .mask = model.bit(target), .anchor = .tiled }) catch |e| return e;
+     if (!m.ws[target.index].tiled_order.append(win)) {
+         _ = m.store.remove(win);
+         return error.CapacityFull;
+     }
+-    // home_ws cache set only after a tiled slot exists (see model.findHome).
+-    ptr.home_ws = target;
+ }
+ 
+ /// Drops `win` from the store and every workspace list.
+ pub fn unregister(m: *model.Model, win: model.WindowId) void {
+     if (!m.store.remove(win)) return;
+-    // Scrub EVERY workspace's lists, not just the cached home_ws. A stale
+-    // id left in some other workspace's tiled_order would make a later
+-    // layout pass move or draw a window the store no longer has, and there
+-    // is no way to detect that from the entry once it is gone. Whole-model
+-    // scan, provably idempotent, and it removes the home_ws-then-unregister
+-    // ordering dance.
++    // Scrub EVERY workspace's lists: a stale id left in any tiled_order would
++    // make a later layout pass move or draw a window the store no longer has,
++    // and there is no way to detect that from the entry once it is gone.
++    // Whole-model scan, provably idempotent.
+     for (&m.ws) |*s| {
+         model.removeValue(&s.tiled_order, win);
+         model.removeValue(&s.focus_mru, win);
+--- a/build.zig	2026-10-26 00:49:53.950261688 +0000
++++ b/build.zig	2026-10-26 00:49:53.969671627 +0000
+@@ -3309,11 +3309,10 @@
+         edges: []const []const u8,
+         source_paths: *const std.StringHashMap([]const u8),
+     ) !void {
+-        // The model vocabulary is the one pure root: core/model.zig (the
+-        // public facade) plus the Rect/Margins values that state holds
+-        // (core/architecture/domain.zig, private to the facade). `satI16`
+-        // also serves the pure tiling layer, which is why the coordinate
+-        // helpers cannot live on the x11 side. The src/core/pure/ shelf
++        // The model vocabulary is the one pure root: core/model.zig (state
++        // plus the Rect/Margins values it holds). `satI16` also serves the
++        // pure tiling layer, which is why the coordinate helpers cannot live
++        // on the x11 side. The src/core/pure/ shelf
+         // (bounded, idmap) and src/core/display/ (scaling) are xcb-free by
+         // construction. The architecture/ contract vocabulary
+         // (contract_dispatch.zig, tiling_contract.zig) keeps xcb out as well
+@@ -3333,8 +3332,7 @@
+         // tiling-seam APIs, so its core imports are the orchestration design,
+         // not layer leakage. Rule 3 still sweeps it for xcb tokens (none).
+         if (std.mem.endsWith(u8, rel_path, "src/config/model_config.zig")) return;
+-        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/domain.zig") or
+-            std.mem.endsWith(u8, rel_path, "src/core/model.zig"))
++        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/model.zig"))
+             "model"
+         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
+             "tiling"
+@@ -3357,9 +3355,8 @@
+     /// The allowed-import policy behind `assertPureLayerImports`. The pure
+     /// shelf — src/core/pure/ (bounded, idmap), src/core/display/scaling.zig,
+     /// and the log/masks leaves — is xcb-free by construction and safe for
+-    /// every layer; the state facade (`model`, which re-exports the private
+-    /// vocabulary `domain`) is the shared data model AND the geometry
+-    /// vocabulary (Rect/Margins) that the state holds. A pure layer's OWN
++    /// every layer; the state root (`model`) is the shared data model AND the
++    /// geometry vocabulary (Rect/Margins) that the state holds. A pure layer's OWN
+     /// siblings are derived from the discovery walk (`source_paths`) rather
+     /// than hand-listed, so the guard cannot go stale as a layer gains or
+     /// loses files. The per-layer extras are the pure neighborhoods each
+@@ -3390,8 +3387,7 @@
+         // so the pure config layer's `@import("composed")` cannot trip the
+         // guard if edge-based wiring ever sees the name.
+         if (std.mem.eql(u8, dep, "composed")) return true;
+-        if (std.mem.eql(u8, dep, "model") or
+-            std.mem.eql(u8, dep, "domain")) return true;
++        if (std.mem.eql(u8, dep, "model")) return true;
+         if (std.mem.eql(u8, layer, "model")) return false;
+         // Same-layer siblings: any discovered module whose own source path
+         // lives under this layer's directory root.
+--- a/AGENTS.md	2026-10-26 00:49:53.950316576 +0000
++++ b/AGENTS.md	2026-10-26 00:49:53.969726662 +0000
+@@ -85,9 +85,9 @@
+ 
+ - `src/core/` — event loop, X11 layer, input handling (`src/core/input/`:
+   `xkb`, `keybinds`, `keys`, `mouse`, `dispatch`, `cursor`, `keymap`),
+-  reconcile boundary, `src/core/architecture/` (contracts + `domain.zig` +
+-  `model.zig`,
+-  the single source of truth for window state, deliberately X11-free).
++  reconcile boundary, `src/core/architecture/` (contracts), and
++  `src/core/model.zig` (state + vocabulary: the single source of truth for
++  window state, deliberately X11-free).
+ - `src/window/`, `src/tiling/`, `src/bar/`, `src/config/` —
+   subsystems; optional ones (`tiling`, `bar`, most modules) can be deleted.
+ - `src/test/` — unit tests, organized by area (`core`, `window`, `tiling`,
+@@ -105,7 +105,7 @@
+   (run inside every reconcile grab in `src/core/loop/pipeline.zig`) trip loudly on
+   a membership violation, and check-layers.sh Rule 5 confines `.tiled_order`
+   mutations to a reviewed six-file write set. Vocabulary lives in
+-  `src/core/architecture/domain.zig`.
++  `src/core/model.zig`.
+ - Unit tests that need a display self-skip with `SkipZigTest` when none is
+   available; `xtest.sh` sets `HANA_REQUIRE_X=1` so that path can never go green
+   by skipping.
+--- a/dev/test-coverage-allowlist.txt	2026-10-26 00:49:53.962887540 +0000
++++ b/dev/test-coverage-allowlist.txt	2026-10-26 00:49:53.971016257 +0000
+@@ -25,7 +25,6 @@
+ diagnostic      dumpState over live core state; covered by the e2e STATE DUMP log assertions
+ dispatch        action execution against live model/X; covered by e2e and the X-gated action tests through seams
+ document        parse document tree; its vocabulary is parser's public surface (parser_test imports parser)
+-domain          X11-free vocabulary; reached through model (model_test and most subsystem tests)
+ editor          prompt line editor; needs the chrome overlay fixture
+ fibonacci       layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+ grid            layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+--- a/dev/scripts/check-layers.sh	2026-10-26 00:49:53.950400253 +0000
++++ b/dev/scripts/check-layers.sh	2026-10-26 00:49:53.972206781 +0000
+@@ -302,7 +302,7 @@
+ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
+ 
+ # Rule 3: no xcb imports/references in the pure state vocabulary
+-# (model.zig + its private domain.zig), the split contract vocabulary
++# (model.zig), the split contract vocabulary
+ # (tiling_contract.zig, contract_dispatch.zig, window_contract.zig,
+ # bar_contract.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+ # `//` commentary that merely names an xcb symbol does not trip the guard. The
+@@ -320,10 +320,9 @@
+ # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
+ # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
+ # that scan, is the last line of defense on bodies. Only the state files are
+-# swept: model.zig is the pure root (state plus the re-exported
+-# Rect/Margins value objects and their coordinate helpers), its domain.zig
+-# sibling is private to it, and the pure/ shelf carries no xcb tokens by
+-# construction. The split contracts (from the 2026-10 monolithic
++# swept: model.zig is the pure root (state plus the Rect/Margins value
++# objects and their coordinate helpers), and the pure/ shelf carries no xcb
++# tokens by construction. The split contracts (from the 2026-10 monolithic
+ # contract.zig) ARE on this side of the sweep: they name the key-press event
+ # as an opaque `KeyPressEvent` and carry the connection as `*const anyopaque`,
+ # so they are xcb-free vocabulary and are swept like any other pure file.
+@@ -333,7 +332,7 @@
+ # contract_window.zig / contract_segment.zig into the monolith (2026-10-08)
+ # and the monolith's later split into per-engine contracts are both history;
+ # the sweep follows the files, not the lineage.)
+-mapfile -t rule3_files < <(find src/core/architecture/domain.zig src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
++mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
+ if [ "${#rule3_files[@]}" -eq 0 ]; then
+     viol "rule 3 (sweep input set is empty)"
+     hits=""
