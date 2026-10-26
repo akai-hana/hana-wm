@@ -91,10 +91,6 @@ fn parkEntry(m: *model.Model, win: model.WindowId, origin: *?model.WSId) ?usize 
         model.removeValue(&m.ws[h.index].tiled_order, win);
         origin.* = h;
     }
-    // Clear the cached home for every anchor: a parked window is in no
-    // tiled_order, and keeping its home fed parked windows into a
-    // destination tiled_order on move/tag.
-    e.home_ws = null;
     e.presence = .parked; // mode stays unchanged (base/fullscreen)
     return slot;
 }
@@ -134,9 +130,6 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
                 }
             }
         }
-        e.home_ws = h;
-    } else {
-        e.home_ws = null; // floating restores, stays home-free
     }
     // Restore the presence pattern: a fullscreen-carrying window goes back
     // into covering (its `covering_ws` intent was preserved through the

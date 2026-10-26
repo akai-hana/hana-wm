@@ -18,24 +18,20 @@ pub fn register(m: *model.Model, win: model.WindowId, hint_ws: ?model.WSId) erro
     // on a config path) would index out of the model. Fail at the boundary
     // that created the id, not silently on the array read below.
     std.debug.assert(target.isValid());
-    const ptr = m.store.put(win, .{ .mask = model.bit(target), .anchor = .tiled }) catch |e| return e;
+    _ = m.store.put(win, .{ .mask = model.bit(target), .anchor = .tiled }) catch |e| return e;
     if (!m.ws[target.index].tiled_order.append(win)) {
         _ = m.store.remove(win);
         return error.CapacityFull;
     }
-    // home_ws cache set only after a tiled slot exists (see model.findHome).
-    ptr.home_ws = target;
 }
 
 /// Drops `win` from the store and every workspace list.
 pub fn unregister(m: *model.Model, win: model.WindowId) void {
     if (!m.store.remove(win)) return;
-    // Scrub EVERY workspace's lists, not just the cached home_ws. A stale
-    // id left in some other workspace's tiled_order would make a later
-    // layout pass move or draw a window the store no longer has, and there
-    // is no way to detect that from the entry once it is gone. Whole-model
-    // scan, provably idempotent, and it removes the home_ws-then-unregister
-    // ordering dance.
+    // Scrub EVERY workspace's lists: a stale id left in any tiled_order would
+    // make a later layout pass move or draw a window the store no longer has,
+    // and there is no way to detect that from the entry once it is gone.
+    // Whole-model scan, provably idempotent.
     for (&m.ws) |*s| {
         model.removeValue(&s.tiled_order, win);
         model.removeValue(&s.focus_mru, win);
