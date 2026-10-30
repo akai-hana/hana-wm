@@ -15,7 +15,7 @@ const surface = @import("surface");
 const bindings = @import("bindings");
 
 /// The clock's display format: the configured value or the built-in default.
-pub fn clockFormat(config: bar_config.Config) []const u8 {
+pub fn clockFormat(config: *const bar_config.Config) []const u8 {
     return config.clock_format orelse types.default_clock_format;
 }
 
@@ -385,7 +385,7 @@ pub const DrawContext = struct {
 /// pixels. Collapses the repeated argument list of the icon-ish modules.
 pub fn drawPaddedSegment(
     dc: *DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     x: u16,
     segment_name: []const u8,
@@ -415,7 +415,7 @@ pub fn drawPaddedSegment(
 /// segment's reserved slot never changes when a value color is added.
 pub fn drawPaddedSegmentValue(
     dc: *DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     x: u16,
     segment_name: []const u8,

@@ -6,7 +6,6 @@
 //! (resolved once in initAtoms), not by the bar orchestrator.
 
 const core = @import("core");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const xcb = core.xcb;
 

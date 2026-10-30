@@ -8,7 +8,6 @@
 // hz memo). A DRAW must not detect it, because detection writes that memo.
 const hz = @import("hz");
 
-const types = @import("types");
 const bar_config = @import("bar_config");
 
 const segmod = @import("segment");
@@ -221,7 +220,7 @@ fn drawFittedTitle(
 /// Accent colour for a title segment: focused wins, then minimized, then the
 /// unfocused fallback.
 inline fn accentFor(
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     is_focused: bool,
     is_minimized: bool,
     unfocused_fallback: u32,

@@ -394,7 +394,7 @@ fn write(w: slider.Write, v: u8) void {
 /// returning the text (plus the numeric region). Truncated tail is scan-safe.
 /// With no backend at all, `muted` is forced true so the segment renders MUTE
 /// rather than `VOL 0%`, which would claim a sink read that never happened.
-fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Label {
+fn renderDisplay(config: *const bar_config.Config, muted: bool, buf: []u8) drawing.Label {
     const effective_mute = muted or !g.has_value;
     const fmt = if (effective_mute)
         (config.volume_muted_format orelse default_muted_format)
@@ -433,7 +433,7 @@ pub fn clearNativeBackendForTest() void {
     g.native_alsa = null;
 }
 
-pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
+pub fn label(config: *const bar_config.Config, buf: []u8) drawing.Label {
     return renderDisplay(config, g.muted, buf);
 }
 

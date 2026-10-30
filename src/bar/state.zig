@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const core = @import("core");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const query = @import("query");
 const model = @import("model");
@@ -65,10 +64,12 @@ const WindowCtx = struct {
     }
 };
 
-/// The live bar configuration, read straight from core rather than copied: a copy
-/// would borrow slices from a config the caller frees and need a re-point on reload.
-pub inline fn renderBar() bar_config.Config {
-    return core.getState().config.bar;
+/// The live bar configuration, borrowed from core rather than copied: the
+/// returned pointer is valid for the synchronous frame that reads it (the
+/// config box is swapped only between frames, on reload, which also rebuilds
+/// the bar State that would cache it).
+pub inline fn renderBar() *const bar_config.Config {
+    return &core.getState().config.bar;
 }
 
 const RenderCtx = struct {
@@ -277,7 +278,7 @@ pub const State = struct {
         const s = try allocator.create(State);
         // Styled, matching the draw's own probe, so the reservation and the
         // paint agree for a [bar.properties]-styled clock.
-        const clock_width = center_row.mergedClockWidth(dc, config, height, drawing.DrawContext.measureTextWidthStyled);
+        const clock_width = center_row.mergedClockWidth(dc, &config, height, drawing.DrawContext.measureTextWidthStyled);
         s.* = .{
             .win = .{
                 .conn = conn,

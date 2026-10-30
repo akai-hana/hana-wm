@@ -177,7 +177,7 @@ const FakeLevel = struct {
     fn noRead() bool {
         return false;
     }
-    fn label(_: bar_config.Config, _: []u8) drawing.Label {
+    fn label(_: *const bar_config.Config, _: []u8) drawing.Label {
         return .{ .text = "", .value_start = 0, .value_len = 0 };
     }
 };

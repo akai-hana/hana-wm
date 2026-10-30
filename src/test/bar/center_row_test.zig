@@ -116,5 +116,5 @@ test "mergedClockWidth is the max self-ticker span plus double padding" {
         if (segmod.segmentAt(cid).measureString) |ms|
             expected = @max(expected, stubWidth({}, ms(), config.segmentProps(segmod.segmentAt(cid).name)) + 2 * padding);
     }
-    try testing.expectEqual(expected, center_row.mergedClockWidth({}, config, height, stubWidth));
+    try testing.expectEqual(expected, center_row.mergedClockWidth({}, &config, height, stubWidth));
 }

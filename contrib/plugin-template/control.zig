@@ -98,7 +98,7 @@ fn commitCost() slider.CommitCost {
 /// region; valid until the next call. `renderLineValue` is the
 /// shared `{pct}`/`{state}` substitution walker — use it unless
 /// your display format is genuinely bespoke.
-fn label(config: bar_config.Config, buf: []u8) drawing.Label {
+fn label(config: *const bar_config.Config, buf: []u8) drawing.Label {
     _ = config; // TODO: your config-driven format string, if any.
     return drawing.renderLineValue(default_format, g_pct, null, buf);
 }

@@ -1,7 +1,6 @@
 //! Layout icon bar segment.
 //! Displays the active tiling layout symbol on the status bar.
 
-const types = @import("types");
 const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const window = @import("window");
@@ -41,7 +40,7 @@ fn getIcon() []const u8 {
     );
 }
 
-fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_x: u16) !bar_contract.Painted {
+fn draw(dc: *drawing.DrawContext, config: *const bar_config.Config, height: u16, start_x: u16) !bar_contract.Painted {
     return segmod.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 

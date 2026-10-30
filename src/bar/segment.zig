@@ -63,7 +63,7 @@ pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
 /// stay opaque here exactly as `KeyPressEvent` is opaque in the contract.
 pub const DrawCtx = struct {
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     conn: core.Connection,
     allocator: std.mem.Allocator,
@@ -358,7 +358,7 @@ pub fn finishDraw(seg: *const contract.Segment, painted: contract.Painted) bool 
 pub fn drawAndStore(
     comptime name: []const u8,
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     start_x: u16,
     text: []const u8,

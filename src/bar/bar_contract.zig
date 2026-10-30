@@ -55,8 +55,8 @@ pub const KeyPressEvent = opaque {};
 /// bar's per-frame scratch, so the contract stays X-free and a headless
 /// consumer can assemble the environment without an X server.
 pub const DrawEnv = struct {
-    /// Bar config snapshot for the frame (theme, widths, cadences).
-    config: bar_config.Config,
+    /// Bar config for the frame (theme, widths, cadences), borrowed.
+    config: *const bar_config.Config,
     /// Bar height in pixels (shared by every segment's draw).
     height: u16,
     /// Segment allocator (per-frame scratch, font probing, etc.).

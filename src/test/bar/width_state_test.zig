@@ -124,7 +124,7 @@ test "DrawEnv carries the X-free frame environment" {
         .is_all_view_active = false,
     };
     const env: contract.DrawEnv = .{
-        .config = cfg,
+        .config = &cfg,
         .height = 24,
         .allocator = alloc,
         .width = 120,
@@ -138,6 +138,7 @@ test "DrawEnv carries the X-free frame environment" {
     try std.testing.expectEqual(@as(u8, 1), env.frame.current_workspace);
     try std.testing.expectEqual(@as(u32, 3), env.frame.workspace_count);
     try std.testing.expect(env.allocator.ptr == alloc.ptr);
-    // The config is a real bar_config.Config by value, not an opaque handle.
+    // The config is the real bar_config.Config behind a borrowed pointer, not
+    // an opaque handle.
     _ = cfg.segmentProps("cpu");
 }

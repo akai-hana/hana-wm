@@ -146,21 +146,21 @@ test "label honors configuration" {
     cfg.volume_muted_format = "Silenced {state}";
     var buf: [128]u8 = undefined;
     volume.setDisplayForTest(42, false);
-    try std.testing.expectEqualStrings("Level 42", volume.label(cfg, &buf).text);
-    try std.testing.expectEqualStrings("42", valueSpan(volume.label(cfg, &buf)));
+    try std.testing.expectEqualStrings("Level 42", volume.label(&cfg, &buf).text);
+    try std.testing.expectEqualStrings("42", valueSpan(volume.label(&cfg, &buf)));
     volume.setDisplayForTest(42, true);
-    try std.testing.expectEqualStrings("Silenced mute", volume.label(cfg, &buf).text);
-    try std.testing.expectEqual(@as(usize, 0), volume.label(cfg, &buf).value_len);
+    try std.testing.expectEqualStrings("Silenced mute", volume.label(&cfg, &buf).text);
+    try std.testing.expectEqual(@as(usize, 0), volume.label(&cfg, &buf).value_len);
     volume.setDisplayForTest(42, false);
 }
 
 test "label default formats" {
     var buf: [128]u8 = undefined;
     volume.setDisplayForTest(33, false);
-    try std.testing.expectEqualStrings("VOL 33%", volume.label(bar_config.Config{}, &buf).text);
-    try std.testing.expectEqualStrings("33%", valueSpan(volume.label(bar_config.Config{}, &buf)));
+    try std.testing.expectEqualStrings("VOL 33%", volume.label(&bar_config.Config{}, &buf).text);
+    try std.testing.expectEqualStrings("33%", valueSpan(volume.label(&bar_config.Config{}, &buf)));
     volume.setDisplayForTest(33, true);
-    try std.testing.expectEqualStrings("MUTE", volume.label(bar_config.Config{}, &buf).text);
+    try std.testing.expectEqualStrings("MUTE", volume.label(&bar_config.Config{}, &buf).text);
     volume.setDisplayForTest(33, false);
 }
 
@@ -178,7 +178,7 @@ test "no backend renders MUTE rather than VOL 0%" {
     // condition: the forced-mute path owns the display.
     volume.setDisplayForTest(0, false);
     volume.clearValueForTest();
-    try std.testing.expectEqualStrings("MUTE", volume.label(cfg, &buf).text);
+    try std.testing.expectEqualStrings("MUTE", volume.label(&cfg, &buf).text);
 }
 
 test "a read value un-mutes the display again" {
@@ -190,5 +190,5 @@ test "a read value un-mutes the display again" {
     // setDisplayForTest also sets the has-value flag (a supplied pct is a
     // level some rung read), so the un-muted format returns.
     volume.setDisplayForTest(42, false);
-    try std.testing.expectEqualStrings("VOL 42%", volume.label(cfg, &buf).text);
+    try std.testing.expectEqualStrings("VOL 42%", volume.label(&cfg, &buf).text);
 }
