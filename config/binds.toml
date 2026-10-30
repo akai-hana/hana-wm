@@ -35,8 +35,8 @@ Mod+scroll_down  = "scroll_view_left"
 # -- Master-stack layout --
 Mod+H       = "decrease_master"      # Shrink master area width
 Mod+L       = "increase_master"      # Grow master area width
-Mod+Shift+H = "decrease_master_count"
-Mod+Shift+L = "increase_master_count"
+Mod+Shift+H = "increase_master_count"
+Mod+Shift+L = "decrease_master_count"
 Mod+N       = "stack_top"            # Grow topmost slave, shrink the rest evenly
 Mod+O       = "stack_bottom"         # Grow bottommost slave, shrink the rest evenly
 
