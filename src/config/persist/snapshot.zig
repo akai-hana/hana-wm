@@ -12,7 +12,7 @@ const log = std.log.scoped(.snapshot);
 /// `$XDG_RUNTIME_DIR/{base}{ext}` when set (already per-user, so no uid
 /// suffix), else `/tmp/{base}-{uid}{ext}` so co-located users stay apart.
 /// The uid suffix in the fallback is load-bearing. Deliberately NOT used by
-/// native_pulse's socket probe: PulseAudio's `/run/user/{uid}` fallback is a
+/// volume's PulseAudio socket probe: PulseAudio's `/run/user/{uid}` fallback is a
 /// different convention, not this policy. Callers own the returned slice.
 pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) ![]u8 {
     if (std.c.getenv("XDG_RUNTIME_DIR")) |dir|
