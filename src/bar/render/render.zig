@@ -51,18 +51,25 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
     // Titles/geoms come from the WM-owned title cache and the sync
     // truth-rect -- no X11 work, so the draw path is non-blocking.
     const entries = s.frame.entries[0..s.frame.entries_len];
-    for (entries) |*e| {
+    var first_minimized = false;
+    for (entries, 0..) |*e, i| {
+        const is_minimized = s.title_data.minimized.contains(e.window);
         e.title = window_facts.peekTitle(e.window);
-        e.geom = titleGeom(e.window, s.title_data.minimized.contains(e.window));
+        e.geom = titleGeom(e.window, is_minimized);
+        if (i == 0) first_minimized = is_minimized;
     }
     var minimized_title: []const u8 = "";
-    if (entries.len > 0 and s.title_data.minimized.contains(entries[0].window))
-        minimized_title = entries[0].title;
+    if (first_minimized) minimized_title = entries[0].title;
     ctx.focused_window = focus.getFocused();
     // Copy, do not borrow: `peekTitle` returns a slice of the cache's own
     // storage, and this ctx outlives the draw through `frame.last_ctx`.
     if (ctx.focused_window) |fw| {
-        const src = window_facts.peekTitle(fw);
+        // The focused window is usually entries[0]; reuse the title already
+        // peeked for it instead of hashing the cache lookup a second time.
+        const src = if (entries.len > 0 and entries[0].window == fw)
+            entries[0].title
+        else
+            window_facts.peekTitle(fw);
         @memcpy(s.title_data.focused_title_buf[0..src.len], src);
         ctx.focused_title = s.title_data.focused_title_buf[0..src.len];
     } else {
@@ -359,9 +366,10 @@ pub fn performDraw() void {
     if (!s.dirty.flag and s.frame.ctx_valid and
         !hasLayoutSegmentDirty(s))
     {
-        var ctx = s.frame.last_ctx;
-        drawAllInner(s, &ctx);
-        s.frame.last_ctx = ctx;
+        // Reuse the cached snapshot in place: drawSegment only rewrites the
+        // per-slot name/width scratch, so copying the whole DrawCtx (and its
+        // config/frame) in and back out bought nothing.
+        drawAllInner(s, &s.frame.last_ctx);
         if (s.dirty.span_w > 0)
             s.render.dc.queueBlit(s.dirty.span_x, s.dirty.span_w);
         return;
@@ -587,12 +595,13 @@ inline fn reportDrewNothing(x: u16, s: *State, id: ?usize) contract.Painted {
 /// forgets its drawn width stays locked onto its startup width.
 fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16) Drawn {
     const i = id orelse return .{ .painted = reportDrewNothing(x, s, null), .drew = false };
-    if (segmod.segmentAt(i).draw == null) return .{ .painted = reportDrewNothing(x, s, id), .drew = false };
+    const seg = segmod.segmentAt(i);
+    if (seg.draw == null) return .{ .painted = reportDrewNothing(x, s, id), .drew = false };
     // Pin reserved width + name into the shared DrawCtx immediately before the
     // draw so width-reading renderers advance and modules resolve their colors.
-    ctx.name = segmod.segmentAt(i).name;
+    ctx.name = seg.name;
     ctx.width = width orelse measureSegmentWidth(s, &ctx.frame, id);
-    const painted = segmod.segmentAt(i).draw.?(ctx, x) catch |e| {
+    const painted = seg.draw.?(ctx, x) catch |e| {
         // Rate-limited (P2-62): a permanently broken segment fails every
         // dirty frame; first failure logs at once.
         if (s.drawFailLogDue(id, core.realtimeMs()))
@@ -603,7 +612,7 @@ fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16)
     };
     return .{
         .painted = painted,
-        .drew = segmod.finishDraw(segmod.segmentAt(i), painted),
+        .drew = segmod.finishDraw(seg, painted),
     };
 }
 
@@ -661,13 +670,14 @@ pub fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
     s.layout_gen +%= 1;
     const r = &s.render;
     const fr = &ctx.frame;
-    const scaled_spacing = state.renderBar().scaledSpacing(r.height);
+    const bar = state.renderBar();
+    const scaled_spacing = bar.scaledSpacing(r.height);
     plan.cluster.scaled_spacing = scaled_spacing;
     plan.cluster.right_x = r.width;
 
     // Measure right cluster once so left/center placement can shrink around
     // it and the draw need not re-measure.
-    for (state.renderBar().layout.items) |lay| {
+    for (bar.layout.items) |lay| {
         if (lay.position != .right) continue;
         for (lay.segments.items) |seg| {
             const w = measureSegmentWidth(s, fr, segmod.segId(seg));
@@ -687,7 +697,7 @@ pub fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
     // CLAIM; the painted cursor paint threads separately can differ -- a
     // click bound must match the pixels, not the plan.
     var claimed: u16 = 0;
-    for (state.renderBar().layout.items) |lay| {
+    for (bar.layout.items) |lay| {
         switch (lay.position) {
             .left, .center => {
                 // Saturating: a pathological reservation clamps at 0, not wrap.
@@ -758,7 +768,9 @@ pub fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
 /// Walks the solved plan in paint order. Flat: the backward right-cluster
 /// cursor is already baked into the plan's slot positions.
 pub fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
-    const scaled_spacing = state.renderBar().scaledSpacing(s.render.height);
+    // Solve already computed the scaled spacing; re-deriving it here re-read
+    // the config and redid the float math for no new information.
+    const scaled_spacing = plan.cluster.scaled_spacing;
     // Left/center advance threaded separately from the plan's right-cluster
     // positions: a right slot's `x` is final, a left/center one can move.
     var x: u16 = 0;
