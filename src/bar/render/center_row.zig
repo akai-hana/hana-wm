@@ -4,7 +4,6 @@
 //! budget as a value, string width as a probe parameter) -- every
 //! derivation is unit-testable without a DrawContext or a live bar.
 
-const types = @import("types");
 const bar_config = @import("bar_config");
 const segmod = @import("segment");
 
@@ -69,7 +68,7 @@ pub fn centerRowBudget(
 /// paints, and the row overlaps until an unrelated full redraw.
 pub fn mergedClockWidth(
     ctx: anytype,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     measure: *const fn (@TypeOf(ctx), []const u8, bar_config.SegmentProps) u16,
 ) u16 {

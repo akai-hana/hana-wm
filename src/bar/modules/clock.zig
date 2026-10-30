@@ -10,7 +10,6 @@
 //! the main thread, so there are no locks, flags, or drain races.
 
 const std = @import("std");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const segmod = @import("segment");
@@ -161,7 +160,7 @@ fn tickDeadlineMs() i32 {
 /// Draws the current time at `start_x`, formatting at most once per
 /// wall-second. Covers the reserved slot with the mode's own probe so a
 /// region-scoped repaint leaves no stale pixels.
-fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_x: u16) !contract.Painted {
+fn draw(dc: *drawing.DrawContext, config: *const bar_config.Config, height: u16, start_x: u16) !contract.Painted {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), g.mode);

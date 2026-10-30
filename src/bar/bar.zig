@@ -531,7 +531,7 @@ pub fn updateClock() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
     if (self_ticking_ids.len == 0) return;
-    const fmt = drawing.clockFormat(core.getState().config.bar);
+    const fmt = drawing.clockFormat(state.renderBar());
     if (!anyBoolHook(.secondsElapsed, .{fmt})) return;
 
     if (render.adoptFreshClockWidth(s)) {

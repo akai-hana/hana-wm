@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const drawing = @import("drawing");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const model = @import("model");
 
@@ -16,7 +15,7 @@ const model = @import("model");
 /// render that mutates global detection state is a phase violation.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     start_x: u16,
     width: u16,

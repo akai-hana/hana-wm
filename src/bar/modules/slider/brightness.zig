@@ -23,7 +23,6 @@
 
 const std = @import("std");
 const core = @import("core");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const slider = @import("slider");
 const drawing = @import("drawing");
@@ -366,7 +365,7 @@ fn write(w: slider.Write, v: u8) void {
 
 /// Renders the display string into `buf`, substituting every `{pct}`
 /// placeholder; a truncated tail is still a complete, scan-safe string.
-fn renderDisplay(config: bar_config.Config, pct: u8, buf: []u8) drawing.Label {
+fn renderDisplay(config: *const bar_config.Config, pct: u8, buf: []u8) drawing.Label {
     const fmt = config.brightness_format orelse default_format;
     return drawing.renderLineValue(fmt, pct, null, buf);
 }
@@ -374,7 +373,7 @@ fn renderDisplay(config: bar_config.Config, pct: u8, buf: []u8) drawing.Label {
 /// Copies the config's `brightness_device` pin into the owned buffer (config
 /// slices are freed on reload). A pin change also drops the absent backoff: a
 /// reload naming a different device must be probed immediately.
-fn cacheConfigPin(config: bar_config.Config) void {
+fn cacheConfigPin(config: *const bar_config.Config) void {
     const pin = config.brightness_device orelse "";
     const new_len = @min(pin.len, max_dev_len);
     const changed = g.pin_len != new_len or !std.mem.eql(u8, g.pin[0..g.pin_len], pin[0..new_len]);
@@ -397,7 +396,7 @@ pub fn setDisplayForTest(pct: u8) void {
     g.pct = pct;
 }
 
-pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
+pub fn label(config: *const bar_config.Config, buf: []u8) drawing.Label {
     cacheConfigPin(config);
     return renderDisplay(config, g.pct, buf);
 }

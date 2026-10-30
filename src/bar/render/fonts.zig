@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const log = std.log.scoped(.fonts);
-const types = @import("types");
 const bar_config = @import("bar_config");
 const bindings = @import("bindings");
 

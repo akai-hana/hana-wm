@@ -68,7 +68,7 @@ const TagsState = struct {
 var g: TagsState = .{};
 
 /// Display label for workspace `i`, falling back through icons, labels, "?".
-inline fn getLabel(i: usize, config: bar_config.Config) []const u8 {
+inline fn getLabel(i: usize, config: *const bar_config.Config) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < workspace_labels.len) return workspace_labels[i];
     return "?";
@@ -82,7 +82,7 @@ fn invalidate() void {
 /// Rebuilds the label-width and geometry cache if stale.
 fn ensureCache(
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     ws_current: u8,
     ws_all_active: bool,
@@ -105,7 +105,7 @@ fn ensureCache(
     g.cache_valid = true;
     g.cache_ws_current = ws_current;
     g.cache_ws_all_active = ws_all_active;
-    g.last_config = config;
+    g.last_config = config.*;
     g.last_height = height;
     g.last_geom_valid = true;
 
@@ -165,7 +165,7 @@ fn indicatorPos(
 /// and the single all-view collapse cell.
 fn drawCell(
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     x: u16,
     cell_w: u16,
@@ -209,7 +209,7 @@ fn anyWorkspaceHasWindows(ws_has_windows: []const bool) bool {
 /// the 8+ tags collapse into a single "花" tag rendered as current.
 fn drawFrame(
     dc: *drawing.DrawContext,
-    config: bar_config.Config,
+    config: *const bar_config.Config,
     height: u16,
     start_x: u16,
     ws_current: u8,

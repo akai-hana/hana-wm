@@ -300,7 +300,7 @@ fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     render.clearBlinkRepaint();
     // While covered, title's pollTimeoutMsHook contributes no marquee
     // wakeup (title owns that decision), so no explicit pause is needed.
-    return render.drawActive(ctx.dc, &ctx.config, ctx.height, x, ctx.width, &g.vim_state);
+    return render.drawActive(ctx.dc, ctx.config, ctx.height, x, ctx.width, &g.vim_state);
 }
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on
