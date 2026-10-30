@@ -63,7 +63,7 @@ test "an expired deadline SIGKILLs the child instead of waiting it out" {
     // budget must come back with empty output well before the child's 5s.
     var buf: [256]u8 = undefined;
     const t0 = core.realtimeMs();
-    const out = spawn_capture.runOutWithTimeoutForTest("sleep 5", &buf, 150);
+    const out = spawn_capture.runOutFor("sleep 5", &buf, 150);
     const elapsed = core.realtimeMs() - t0;
     try std.testing.expectEqualStrings("", out);
     try std.testing.expect(elapsed < 3000);

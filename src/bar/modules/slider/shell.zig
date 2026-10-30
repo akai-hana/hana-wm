@@ -12,7 +12,7 @@
 //! Interaction: wheel ±2%; left press / press-hold drag sets the level from
 //! the horizontal position; right press is the secondary action (volume
 //! mute). THROTTLING depends on the commit's cost: native commits (ioctl /
-//! sysfs / libpulse) land immediately; subprocess spawns are rate-limited to
+//! sysfs / ALSA ioctls) land immediately; subprocess spawns are rate-limited to
 //! `throttle_ms` and coalesced onto the newest value. Display follows the
 //! optimistic `preview`; backend truth arrives on the next read.
 
@@ -63,7 +63,7 @@ pub const Write = enum {
 };
 /// The latency class of ONE commit, as a value the scheduler switches on
 /// rather than a bare bool. Stays a function because the class is a per-BACKEND
-/// fact resolved at runtime (sysfs vs `brightnessctl`; libpulse vs ALSA).
+/// fact resolved at runtime (sysfs vs `brightnessctl`; pactl vs ALSA).
 pub const CommitCost = enum { immediate, rate_limited };
 /// Commit scheduler for scroll/drag events, shared by every slider control.
 pub const Throttle = struct {

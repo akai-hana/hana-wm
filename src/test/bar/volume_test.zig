@@ -17,13 +17,8 @@ const types = @import("types");
 const bar_config = @import("bar_config");
 
 const Probe = volume.Probe;
-const Rung = volume.Rung;
 const reprobe_interval_ms = volume.reprobe_interval_ms;
 const probeDecision = volume.probeDecision;
-const latchedRung = volume.latchedRung;
-const optimisticLevel = volume.optimisticLevel;
-const optimisticAfter = volume.optimisticAfter;
-const noteLadderResult = volume.noteLadderResult;
 
 const no = Probe{ .walk = false };
 const yes = Probe{ .walk = true };
@@ -91,45 +86,32 @@ test "probeDecision: a reachability FLIP is the re-probe trigger" {
     try std.testing.expectEqual(flip, probeDecision(t0 + 1, t0, t0, true, true == false));
 }
 
-test "latchedRung maps a backend to the one read it needs" {
-    // A latched backend must read through its OWN rung, never the ladder's
-    // search order -- the whole point of the latch. Latch/unlatch state is
-    // module-private and used by latchedRung, so the test's assertion only
-    // holds after clearing the (process-global) native backends via the seam.
-    volume.clearNativeBackendForTest();
-    try std.testing.expectEqual(Rung.pactl, latchedRung(.pulse));
-    try std.testing.expectEqual(Rung.amixer, latchedRung(.alsa));
-    try std.testing.expectEqual(Rung.none, latchedRung(.unknown));
-}
-test "noteLadderResult arms the negative cache, and clears it on success" {
-    // Nothing answered: arm at now, so the next poll does not re-walk.
-    try std.testing.expectEqual(@as(?i64, 1_000), noteLadderResult(false, 1_000));
-    // A rung answered: the cache MUST be cleared. An armed failure that
-    // outlives the success that disproved it would leave a recovered daemon
-    // unwalked for the rest of the cache window.
-    try std.testing.expectEqual(@as(?i64, null), noteLadderResult(true, 1_000));
+test "write: with no backend nothing moves the display" {
+    volume.latchStubForTest(null);
+    volume.setDisplayForTest(7, false);
+    volume.sub.write(.preview, 40);
+    volume.sub.write(.apply, 40);
+    try std.testing.expectEqual(@as(?u8, 7), volume.sub.level.?());
 }
 
-test "optimisticAfter moves the display only when a backend exists" {
-    try std.testing.expectEqual(@as(u8, 40), optimisticAfter(.pulse, 40, 7));
-    try std.testing.expectEqual(@as(u8, 40), optimisticAfter(.alsa, 40, 7));
-    // Clamped by the same clamp the commit passes.
-    try std.testing.expectEqual(@as(u8, 100), optimisticAfter(.pulse, 255, 7));
-    // No backend: the display must NOT move. `commitPct` wrote nothing, so 40
-    // would be a level the sink never accepted.
-    try std.testing.expectEqual(@as(u8, 7), optimisticAfter(.unknown, 40, 7));
+test "write: preview and apply move the display (clamped), commit does not" {
+    volume.latchStubForTest(false);
+    defer volume.latchStubForTest(null);
+    volume.setDisplayForTest(7, false);
+    volume.sub.write(.commit, 40);
+    try std.testing.expectEqual(@as(?u8, 7), volume.sub.level.?());
+    volume.sub.write(.preview, 40);
+    try std.testing.expectEqual(@as(?u8, 40), volume.sub.level.?());
+    volume.sub.write(.apply, 255);
+    try std.testing.expectEqual(@as(?u8, 100), volume.sub.level.?());
 }
 
-test "optimisticLevel echoes a committed level, but never invents one" {
-    // A press displays what it just wrote...
-    try std.testing.expectEqual(@as(?u8, 40), optimisticLevel(.pulse, 40));
-    try std.testing.expectEqual(@as(?u8, 40), optimisticLevel(.alsa, 40));
-    // ...clamped by the same clamp every commit passes, so the optimistic
-    // display cannot show a level the backend would refuse.
-    try std.testing.expectEqual(@as(?u8, 100), optimisticLevel(.pulse, 255));
-    // ...but with no backend, `commitPct` wrote nothing, so there is nothing
-    // to show. Echoing 40 here would display a level the sink never accepted.
-    try std.testing.expectEqual(@as(?u8, null), optimisticLevel(.unknown, 40));
+test "commit_cost follows the latched backend" {
+    volume.latchStubForTest(null);
+    try std.testing.expectEqual(volume.sub.commit_cost(), .rate_limited);
+    volume.latchStubForTest(true);
+    defer volume.latchStubForTest(null);
+    try std.testing.expectEqual(volume.sub.commit_cost(), .immediate);
 }
 
 test "parsePercent extracts first N%" {

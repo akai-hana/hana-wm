@@ -112,18 +112,9 @@ pub const ElemValue = extern struct {
     reserved: [128]u8,
 };
 
-fn ior(comptime typ: u8, comptime nr: u8, comptime size: usize) c_ulong {
-    return (@as(c_ulong, 2) << 30) |
-        (@as(c_ulong, typ) << 8) |
-        @as(c_ulong, nr) |
-        (@as(c_ulong, size) << 16);
-}
-
-fn iowr(comptime typ: u8, comptime nr: u8, comptime size: usize) c_ulong {
-    return (@as(c_ulong, 3) << 30) |
-        (@as(c_ulong, typ) << 8) |
-        @as(c_ulong, nr) |
-        (@as(c_ulong, size) << 16);
+/// `_IOR` (dir 2) / `_IOWR` (dir 3) for the ALSA control ioctl type `'U'`.
+fn ioc(comptime dir: u2, comptime nr: u8, comptime T: type) c_ulong {
+    return (@as(c_ulong, dir) << 30) | (@as(c_ulong, 'U') << 8) | nr | (@as(c_ulong, @sizeOf(T)) << 16);
 }
 
 /// Wraps the libc `ioctl` whose UAPI request arg is a signed `int`: request
@@ -160,7 +151,7 @@ const CardInfo = extern struct {
 /// `SNDRV_CTL_IOCTL_CARD_INFO` -- note the request number is 0x01, not 0x80
 /// (0x80 is the *element* ioctl family) and the size is the 376-byte struct
 /// above, both of which the kernel validates.
-const CARD_INFO = ior('U', 0x01, @sizeOf(CardInfo));
+const CARD_INFO = ioc(2, 0x01, CardInfo);
 
 /// PipeWire's and PulseAudio's ALSA exposure (`libpipewire-module-alsa`, the
 /// old `module-alsa-sink`) register *userspace* control cards that mimic a
@@ -179,10 +170,10 @@ pub fn isShimCard(name: []const u8) bool {
     return false;
 }
 
-pub const ELEM_LIST = iowr('U', 0x10, @sizeOf(ElemList));
-pub const ELEM_INFO = iowr('U', 0x11, @sizeOf(ElemInfo));
-pub const ELEM_READ = iowr('U', 0x12, @sizeOf(ElemValue));
-pub const ELEM_WRITE = iowr('U', 0x13, @sizeOf(ElemValue));
+pub const ELEM_LIST = ioc(3, 0x10, ElemList);
+pub const ELEM_INFO = ioc(3, 0x11, ElemInfo);
+pub const ELEM_READ = ioc(3, 0x12, ElemValue);
+pub const ELEM_WRITE = ioc(3, 0x13, ElemValue);
 
 /// Percentage onto the control's [min..max] scale, nearest-rounding like
 /// `amixer set Master N%` (which maps 50 % of 0..87 to 44). The linear map
@@ -278,9 +269,6 @@ pub const Master = struct {
 /// have far fewer; a larger card is skipped as unverifiable).
 const max_elem_scan: usize = 512;
 
-/// Scans `controlC0..controlC31` and attaches the first usable Master volume
-/// control (with its optional switch). Returns null when nothing answers or
-/// nothing is both MIXER-facing, INTEGER and read/write-able.
 /// The kernel's own card name for this fd, or null when the kernel declines to
 /// report one. `snd_ctl_card_info` is a 96-byte struct whose `name` field is
 /// `char[16]` at offset 12; anything unreadable is treated as "not a shim",
@@ -306,93 +294,61 @@ fn cardIsShim(fd: c_int) bool {
     return isShimCard(name);
 }
 
-pub fn openMaster() ?Master {
-    var ids: [max_elem_scan]ElemId = undefined;
-    var path: [32]u8 = undefined;
-    for (0..32) |card| {
-        const p = std.fmt.bufPrint(&path, "/dev/snd/controlC{d}", .{card}) catch return null;
-        path[p.len] = 0;
-        const fd = c.open(&path, c.O_RDWR | c.O_CLOEXEC, @as(c_uint, 0));
-        if (fd < 0) continue;
+/// A control we can drive: right element type, writable, not inactive.
+fn usable(info: ElemInfo, typ: c_int) bool {
+    return info.type == typ and
+        (info.access & SNDRV_CTL_ELEM_ACCESS_WRITE) != 0 and
+        (info.access & SNDRV_CTL_ELEM_ACCESS_INACTIVE) == 0;
+}
 
-        if (cardIsShim(fd)) {
-            _ = c.close(fd);
-            continue;
-        }
-
-        var list: ElemList = .{
-            .offset = 0,
-            .space = 0,
-            .used = 0,
-            .count = 0,
-            .pids = null,
-            .reserved = undefined,
-        };
-        if (devctl(fd, ELEM_LIST, &list) != 0 or list.count == 0 or list.count > max_elem_scan) {
-            _ = c.close(fd);
-            continue;
-        }
-        list.space = list.count;
-        list.pids = @ptrCast(&ids);
-        if (devctl(fd, ELEM_LIST, &list) != 0) {
-            _ = c.close(fd);
-            continue;
-        }
-
-        var vol: ?ElemId = null;
-        var sw: ?ElemId = null;
-        const used = @min(list.used, @as(c_uint, list.count));
-        const elems: []ElemId = ids[0..@intCast(used)];
-        for (elems) |id| {
-            if (id.matches("Master Playback Volume")) {
-                if (vol == null) vol = id;
-            } else if (id.matches("Master Playback Switch")) {
-                if (sw == null) sw = id;
-            }
-        }
-        if (vol == null) {
-            for (elems) |id| {
-                if (id.matches("Master")) {
-                    vol = id;
-                    break;
-                }
-            }
-        }
-
-        const vi = if (vol) |v| elemInfo(fd, v) else null;
-        if (vi == null or
-            vi.?.type != SNDRV_CTL_ELEM_TYPE_INTEGER or
-            (vi.?.access & SNDRV_CTL_ELEM_ACCESS_WRITE) == 0 or
-            (vi.?.access & SNDRV_CTL_ELEM_ACCESS_INACTIVE) != 0)
-        {
-            _ = c.close(fd);
-            continue;
-        }
-
-        var switch_numid: c_uint = 0;
-        if (sw) |s| {
-            if (elemInfo(fd, s)) |si| {
-                if (si.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN and
-                    (si.access & SNDRV_CTL_ELEM_ACCESS_WRITE) != 0 and
-                    (si.access & SNDRV_CTL_ELEM_ACCESS_INACTIVE) == 0)
-                {
-                    switch_numid = si.id.numid;
-                }
-            }
-        }
-
-        return .{
-            .fd = fd,
-            .numid = vi.?.id.numid,
-            .count = @min(vi.?.count, 128),
-            .min = vi.?.value.integer.min,
-            .max = vi.?.value.integer.max,
-            .switch_numid = switch_numid,
-        };
-    }
+fn find(elems: []const ElemId, name: []const u8) ?ElemId {
+    for (elems) |id| if (id.matches(name)) return id;
     return null;
 }
 
-// Pure, subprocess-and-device-free tests: ABI sizes/encodings and the
-// percent mapping are the only logic not already pinned by the live-device
-// probe (see the module doc).
+/// The Master volume (and optional switch) on one card, or null when the card
+/// is a PulseAudio/PipeWire shim or has no MIXER-facing, INTEGER, writable
+/// Master control.
+fn masterOn(fd: c_int) ?Master {
+    if (cardIsShim(fd)) return null;
+
+    var ids: [max_elem_scan]ElemId = undefined;
+    var list = std.mem.zeroes(ElemList);
+    if (devctl(fd, ELEM_LIST, &list) != 0 or list.count == 0 or list.count > max_elem_scan) return null;
+    list.space = list.count;
+    list.pids = @ptrCast(&ids);
+    if (devctl(fd, ELEM_LIST, &list) != 0) return null;
+    const elems = ids[0..@min(list.used, list.count)];
+
+    const vol = find(elems, "Master Playback Volume") orelse find(elems, "Master") orelse return null;
+    const vi = elemInfo(fd, vol) orelse return null;
+    if (!usable(vi, SNDRV_CTL_ELEM_TYPE_INTEGER)) return null;
+
+    const switch_numid: c_uint = blk: {
+        const sw = find(elems, "Master Playback Switch") orelse break :blk 0;
+        const si = elemInfo(fd, sw) orelse break :blk 0;
+        break :blk if (usable(si, SNDRV_CTL_ELEM_TYPE_BOOLEAN)) si.id.numid else 0;
+    };
+    return .{
+        .fd = fd,
+        .numid = vi.id.numid,
+        .count = @min(vi.count, 128),
+        .min = vi.value.integer.min,
+        .max = vi.value.integer.max,
+        .switch_numid = switch_numid,
+    };
+}
+
+/// Scans `controlC0..controlC31` and attaches the first usable Master volume
+/// control (with its optional switch). Null when nothing answers.
+pub fn openMaster() ?Master {
+    var path: [32]u8 = undefined;
+    for (0..32) |card| {
+        const p = std.fmt.bufPrintZ(&path, "/dev/snd/controlC{d}", .{card}) catch return null;
+        const fd = c.open(p, c.O_RDWR | c.O_CLOEXEC, @as(c_uint, 0));
+        if (fd < 0) continue;
+        if (masterOn(fd)) |m| return m;
+        _ = c.close(fd);
+    }
+    return null;
+}

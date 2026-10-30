@@ -2469,7 +2469,7 @@ fn declaresSegmentFor(b: *std.Build, rel_path: []const u8) !bool {
 /// The one sorted list feeds BOTH consumers, so their ordering can never
 /// drift: the generated `<package>_subs` registry `subs[k]`, and the derived
 /// bar segment `segmentFor(i)` with `i == k` (see `bar_segments` above). A
-/// sibling without the binding (e.g. native_alsa.zig / native_pulse.zig
+/// sibling without the binding (e.g. native_alsa.zig
 /// beside the slider package) stays a discovered, importable module but is
 /// never bound.
 fn boundSubStems(
