@@ -104,5 +104,5 @@ Mod+Y       = "thunar"
 Mod+Alt+Y   = "{kill} thunar"
 
 # -- Wallpaper --
-Mod+G       = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh"
-Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"
+Mod+G       = "DRI_PRIME=1 ~/git/animated-glsl-wallpaper/main -k ghostty -x picom"
+Mod+Shift+G = "pkill -9 main"
