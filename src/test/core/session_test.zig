@@ -176,6 +176,37 @@ test "F10: applyModelLevel restores focus, workspace state and every membership"
     try testing.expect(model.visibleOn(&restored, 3, model.findHome(&restored, 3).?));
 }
 
+test "F10: applyModelLevel leaves minimized (parked) windows out of tiled_order" {
+    var src = helpers.makeModel();
+    try buildFixtureModel(&src);
+
+    // Minimize window 2 exactly as the minimize module does: drop its tiled
+    // slot and mark it parked while leaving the tiled anchor in place. The
+    // saved file therefore lists only window 1 on ws0.
+    const e = src.store.getPtr(2).?;
+    model.removeValue(&src.ws[0].tiled_order, 2);
+    e.presence = .parked;
+
+    var f = try scratch.TmpFile.init("apply_parked");
+    defer f.deinit();
+    try session.save(testing.allocator, &src, f.path());
+    try testing.expect(session.loadToGlobal(page_alloc, f.path()));
+
+    var restored = helpers.makeModel();
+    try registerSurvivors(&restored);
+    // Adoption replays minimize's ext blob, which re-parks the window before
+    // the persisted model level is applied.
+    restored.store.getPtr(2).?.presence = .parked;
+
+    session.applyModelLevel(&restored);
+
+    // The parked window keeps no layout slot: re-listing it would make the
+    // tiling layout reserve space for a window that is not on screen.
+    try testing.expect(model.findHome(&restored, 2) == null);
+    try testing.expectEqualSlices(model.WindowId, &.{1}, restored.ws[0].tiled_order.constSlice());
+    try testing.expectEqualSlices(model.WindowId, &.{3}, restored.ws[1].tiled_order.constSlice());
+}
+
 // The per-window blob header stamps a variable-length CLAIMANT NAME, not a
 // 2-byte REGISTRY ORDINAL: an ordinal is a position in a build-generated
 // list, so deleting or reordering an unrelated module renumbers everything
