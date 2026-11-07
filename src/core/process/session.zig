@@ -482,11 +482,15 @@ pub fn applyModelLevel(m: *model.Model) void {
     // dropped before the file was written). Without a tiled slot a window has
     // no placement and the reconcile parks it offscreen indefinitely, so
     // re-append any base-tiled member the file did not list (store order,
-    // list tail).
+    // list tail). A PARKED window is the exception: minimize deliberately
+    // drops its slot and its ext blob re-parks it during adoption, so its
+    // tiled anchor and missing slot are both correct. Re-listing it would hand
+    // the layout an invisible member and leave a gap where it used to be.
     var it = m.store.iterator();
     while (it.next()) |row| {
         const e = row.val;
         if (e.anchor != .tiled) continue;
+        if (e.presence == .parked) continue;
         if (model.findHome(m, row.key) != null) continue;
         // Seat it where the user is looking when it is tagged there, else on
         // its lowest tagged workspace (same policy as minimize's restore).
