@@ -104,5 +104,5 @@ Mod+Y       = "thunar"
 Mod+Alt+Y   = "{kill} thunar"
 
 # -- Wallpaper --
-Mod+G       = "DRI_PRIME=1 ~/git/chrysanth/chrysanth -f ~/eudaimonia/shader-wallpaper/shadow/iso.frag -k ghostty -x \"DRI_PRIME=0 picom\""
+Mod+G       = "~/git/chrysanth/chrysanth"
 Mod+Shift+G = "pkill -9 chrysanth; pkill -9 picom"
