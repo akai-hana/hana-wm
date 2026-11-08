@@ -328,6 +328,16 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     // lookup only ever re-found this file's own fn.
     if (!toggleFullscreen(m, win)) return;
 
+    // Leaving fullscreen reflows the workspace: siblings parked off-screen
+    // move back under a stationary pointer, and the synthetic crossings that
+    // generates must not hand focus to whatever window now sits under the
+    // cursor. Arm the same suppression a tiling op uses (AFTER the toggle
+    // proves it will transition, BEFORE the reconcile) and lift it only once
+    // the server has drained the reflow's events (see the beginTilingOpSettle
+    // call in the exit tail). Enter needs none: the entrant covers the screen
+    // and takes focus itself.
+    if (kind == .exit) focus.setSuppressReason(.tiling_operation);
+
     // Focus the covering winner unless it already owns focus or the toggle
     // turned fullscreen OFF: a covering window owns the screen and must own
     // keyboard focus (EWMH requests can arrive for an unfocused window; a
@@ -387,6 +397,11 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     if (kind == .exit) {
         registry.dispatchAll(.resolvePendingBarNow, .{win});
         core.fullscreen.bump();
+        // Fire the "server caught up" round trip AFTER the reflow's geometry
+        // was flushed: the batch tail drains it and only then lifts the
+        // crossing suppression armed above, so every EnterNotify the exit
+        // generated is filtered before hover focus is allowed again.
+        focus.beginTilingOpSettle();
     }
 
     // Completion is synchronous: elapsed time already covers the reconcile,
