@@ -104,5 +104,5 @@ Mod+Y       = "thunar"
 Mod+Alt+Y   = "{kill} thunar"
 
 # -- Wallpaper --
-Mod+G       = "~/git/chrysanth/chrysanth"
-Mod+Shift+G = "pkill -9 chrysanth; pkill -9 picom"
+Mod+G       = "doas chrysanth"
+Mod+Shift+G = "doas pkill -9 chrysanth; doas pkill -9 picom"
