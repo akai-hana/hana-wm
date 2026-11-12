@@ -274,18 +274,18 @@ fn handleBacktraceRequest(
             const frame_alignment: usize = 8;
             const max_depth: usize = 96;
             const lo = ctx.gprs.get(.rsp);
-            const hi = lo + span;
+            const hi = lo +| span;
             var rbp = ctx.getFp();
             var depth: usize = 0;
             while (rbp >= lo and
-                rbp + frame_stride <= hi and
+                rbp +| frame_stride <= hi and
                 (rbp & (frame_alignment - 1)) == 0 and
                 depth < max_depth)
             {
                 const next: usize = @as(*align(8) const usize, @ptrFromInt(rbp)).*;
-                const ret: usize = @as(*align(8) const usize, @ptrFromInt(rbp + 8)).*;
+                const ret: usize = @as(*align(8) const usize, @ptrFromInt(rbp +| 8)).*;
                 if (!(next > rbp and
-                    next + frame_stride <= hi and
+                    next +| frame_stride <= hi and
                     (next & (frame_alignment - 1)) == 0)) break;
                 rbp = next;
                 depth += 1;
