@@ -14,6 +14,7 @@ const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
+const focus = @import("focus");
 const fixture = @import("fixture");
 const xcb = core.xcb;
 const usable_area = @import("usable_area");
@@ -239,6 +240,38 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     const after_toggle = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
     try std.testing.expectEqual(after_toggle, core.fullscreen.rev());
+}
+
+// Exiting fullscreen on an UNFOCUSED window must not arm the deferred bar
+// show on whatever window happens to own focus: that arm would outlive the
+// exit (which resolves only the exiting window's intent) and a later
+// ConfigureNotify from the focused window would publish a redundant bar
+// state.
+test "pipeline: unfocused fullscreen exit leaves no stale bar-show arm" {
+    var fx = try fixture.setUp("pipeline_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+    const cs = core.getState();
+    const small_w: u16 = @intCast(cs.screen.width_in_pixels / 2);
+    const small_h: u16 = @intCast(cs.screen.height_in_pixels / 2);
+
+    const w1, const w2 = seedTwo(fx);
+
+    // Cover with w2, then move focus to w1 without changing the covering
+    // winner (a pager activation can do exactly this).
+    fullscreen.fullscreenToggleWindow(w2);
+    fx.flush();
+    focus.grabFocus(w1, .user_command);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+
+    // Exit w2. The deterministic exit bump answers the bar question, and the
+    // deferred show must have been armed for w2, not for w1.
+    fullscreen.fullscreenToggleWindow(w2);
+    fx.flush();
+    const after_exit = core.fullscreen.rev();
+    fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
+    try std.testing.expectEqual(after_exit, core.fullscreen.rev());
 }
 
 // Leaving fullscreen restores the bar, which re-claims screen space, which
