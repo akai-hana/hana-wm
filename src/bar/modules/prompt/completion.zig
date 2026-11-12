@@ -219,26 +219,28 @@ fn completeToken(token: []const u8, source: CompletionSource) ?[]const u8 {
     };
 }
 
+/// Completion suffix from one history entry, or null when it cannot extend
+/// `token`. Pure, so the "match the token under the cursor, not the entry's
+/// first word" rule is pinned without the module's global ring.
+pub fn historyCompletion(token: []const u8, entry: []const u8) ?[]const u8 {
+    if (token.len == 0 or entry.len == 0) return null;
+    // Match the token under the CURSOR, not the entry's first word: a
+    // multi-word history line completes its last-word continuation, so
+    // "git ch" can complete from "git checkout".
+    const target = wordAtCursor(entry, entry.len).token;
+    if (target.len <= token.len) return null;
+    if (!std.mem.startsWith(u8, target, token)) return null;
+    // The tail is the completion, but only up to the next space: completing
+    // the whole rest of the line would ghost in a trailing argument too.
+    const rest = target[token.len..];
+    const tail = if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| rest[0..sp] else rest;
+    return if (tail.len == 0) null else tail;
+}
+
 fn completeFromHistory(token: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < g.hist_count) : (i += 1) {
-        const entry = histEntry(i);
-        if (entry.len == 0) continue;
-        // Cheap reject on the first byte: history is a ring of up to
-        // max_history entries and nearly all fail here.
-        if (entry[0] != token[0]) continue;
-        // Match the token under the CURSOR, not the entry's first word. This is
-        // the second half: a multi-word history line completes its
-        // last-word continuation, so "git ch" can complete from "git checkout".
-        const target = wordAtCursor(entry, entry.len).token;
-        if (target.len <= token.len) continue;
-        if (!std.mem.startsWith(u8, target, token)) continue;
-        // The tail is the completion, but only up to the next space: completing
-        // the whole rest of the line would ghost in a trailing argument too.
-        const rest = target[token.len..];
-        const tail = if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| rest[0..sp] else rest;
-        if (tail.len == 0) continue;
-        return tail;
+        if (historyCompletion(token, histEntry(i))) |tail| return tail;
     }
     return null;
 }
