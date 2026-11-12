@@ -5,9 +5,43 @@
 //! offset past the far edge must saturate rather than exceed 100 -- and
 //! each copy is a chance to get one wrong. Deliberately not a "physics"
 //! model: a bar is 0-100 by definition at the wire level, so there is no
-//! curve, detent or non-linearity to configure.
+//! curve or non-linearity to configure.
+//!
+//! The wheel detent lives here too because it is the same vocabulary one
+//! step finer: levels are kept in half-percent units for the 2.5 % grid,
+//! while the wire and the label stay whole percent (the fraction truncates
+//! away on display).
 
 const std = @import("std");
+
+/// Levels are 0-100 %, i.e. 0-200 half-percent units.
+pub const max_half_pct: u16 = 200;
+/// One wheel detent: 2.5 %, in half-percent units.
+pub const detent_half_pct: u16 = 5;
+
+/// The next 2.5 % detent strictly above (`dir > 0`) or below (`dir <= 0`)
+/// `half`, saturating at 0/100 %. Callers that speak whole percent display
+/// `target / 2`; the fraction is what lets a later wheel step continue from
+/// the detent instead of truncating it again.
+pub fn snapHalf(half: u16, dir: i8) u16 {
+    const h = @min(half, max_half_pct);
+    if (dir > 0) {
+        const next = (h / detent_half_pct + 1) * detent_half_pct;
+        return @min(next, max_half_pct);
+    }
+    if (h == 0) return 0;
+    return ((h - 1) / detent_half_pct) * detent_half_pct;
+}
+
+/// Like `snapHalf`, but skips detents whose whole-percent truncation equals
+/// `shown`: a wheel tick must move the label, and 72.5 % displays as 72 %.
+/// The 0/100 % ends are real boundaries, not invisible detents.
+pub fn snapHalfVisible(half: u16, dir: i8, shown: u8) u16 {
+    var target = snapHalf(half, dir);
+    while (target / 2 == @as(u16, shown) and target != 0 and target != max_half_pct)
+        target = snapHalf(target, dir);
+    return target;
+}
 
 /// Maps a pointer offset to 0-100 % of the slot spanning
 /// [slot_x, slot_x+slot_w). Saturating at both ends. `offset` is relative
