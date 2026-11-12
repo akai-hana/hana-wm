@@ -13,7 +13,6 @@ const testing = std.testing;
 
 const center_row = @import("center_row");
 const segmod = @import("segment");
-const types = @import("types");
 const bar_config = @import("bar_config");
 
 /// The registry's self-ticking set, resolved at comptime exactly as

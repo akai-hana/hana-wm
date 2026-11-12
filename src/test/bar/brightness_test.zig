@@ -10,7 +10,6 @@
 const std = @import("std");
 const brightness = @import("brightness");
 const drawing = @import("drawing");
-const types = @import("types");
 const bar_config = @import("bar_config");
 
 const io = std.testing.io;

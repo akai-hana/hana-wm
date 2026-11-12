@@ -10,7 +10,6 @@
 
 const std = @import("std");
 const core = @import("core");
-const types = @import("types");
 const tiling_config = @import("tiling_config");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");

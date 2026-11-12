@@ -22,7 +22,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const build_options = @import("build_options");
-const types = @import("types");
 const composed = @import("composed");
 const model = @import("model");
 const pipeline = @import("pipeline");
