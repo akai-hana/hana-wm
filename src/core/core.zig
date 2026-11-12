@@ -3,7 +3,6 @@
 
 const std = @import("std");
 
-const types = @import("types");
 const composed = @import("composed");
 const scaling = @import("scaling");
 const build_options = @import("build_options");

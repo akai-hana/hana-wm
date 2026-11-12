@@ -11,7 +11,6 @@ const testing = std.testing;
 
 const bar_sections = @import("bar_sections");
 const parser = @import("parser");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const diagnostics = @import("diagnostics");
 

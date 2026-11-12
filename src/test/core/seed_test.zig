@@ -18,7 +18,6 @@ const testing = std.testing;
 const seed = @import("model_config");
 const model = @import("model");
 const helpers = @import("helpers");
-const types = @import("types");
 const tiling_config = @import("tiling_config");
 const tiling = @import("tiling");
 const contract = @import("tiling_contract");
