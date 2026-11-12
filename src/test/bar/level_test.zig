@@ -10,6 +10,54 @@
 const std = @import("std");
 const level = @import("level");
 
+test "snapHalf steps the 2.5 % detent grid" {
+    // From a clean level, one wheel step is 2.5 % (five half-percent units).
+    try std.testing.expectEqual(@as(u16, 5), level.snapHalf(0, 1));
+    try std.testing.expectEqual(@as(u16, 10), level.snapHalf(5, 1));
+    // A whole-percent level off the grid snaps to the next detent in the
+    // direction of travel: 71 % -> 72.5 % up, 70 % down.
+    try std.testing.expectEqual(@as(u16, 145), level.snapHalf(142, 1));
+    try std.testing.expectEqual(@as(u16, 140), level.snapHalf(142, -1));
+    // On the grid the step is a full detent.
+    try std.testing.expectEqual(@as(u16, 150), level.snapHalf(145, 1));
+    try std.testing.expectEqual(@as(u16, 140), level.snapHalf(145, -1));
+}
+
+test "snapHalf saturates at 0 and 100 %" {
+    try std.testing.expectEqual(@as(u16, 0), level.snapHalf(0, -1));
+    try std.testing.expectEqual(@as(u16, 0), level.snapHalf(1, -1));
+    try std.testing.expectEqual(@as(u16, 200), level.snapHalf(200, 1));
+    try std.testing.expectEqual(@as(u16, 200), level.snapHalf(199, 1));
+    try std.testing.expectEqual(@as(u16, 195), level.snapHalf(200, -1));
+    // An over-range cursor is clamped before stepping, not after.
+    try std.testing.expectEqual(@as(u16, 200), level.snapHalf(999, 1));
+}
+
+test "snapHalfVisible skips a detent the label cannot show" {
+    // 72 % -> 72.5 % truncates back to 72, so the visible step is 75 %.
+    try std.testing.expectEqual(@as(u16, 150), level.snapHalfVisible(144, 1, 72));
+    // 2 % -> 2.5 % is the same case at the bottom of the range.
+    try std.testing.expectEqual(@as(u16, 10), level.snapHalfVisible(4, 1, 2));
+    // A detent that does change the label is kept: 71 % -> 72.5 % -> "72".
+    try std.testing.expectEqual(@as(u16, 145), level.snapHalfVisible(142, 1, 71));
+    // The ends saturate instead of wrapping or looping forever.
+    try std.testing.expectEqual(@as(u16, 200), level.snapHalfVisible(200, 1, 100));
+    try std.testing.expectEqual(@as(u16, 0), level.snapHalfVisible(0, -1, 0));
+}
+
+test "every wheel landing is on the 2.5 % grid" {
+    // Starting from an arbitrary backend reading, each step lands on a
+    // detent -- never on an in-between value like 71 or 54.
+    var up: u16 = 142;
+    var down: u16 = 142;
+    for (0..40) |_| {
+        up = level.snapHalf(up, 1);
+        down = level.snapHalf(down, -1);
+        try std.testing.expectEqual(@as(u16, 0), up % level.detent_half_pct);
+        try std.testing.expectEqual(@as(u16, 0), down % level.detent_half_pct);
+    }
+}
+
 test "pctFromSlot maps an offset across a slot" {
     try std.testing.expectEqual(@as(u8, 0), level.pctFromSlot(10, 100, 10));
     try std.testing.expectEqual(@as(u8, 50), level.pctFromSlot(10, 100, 60));
