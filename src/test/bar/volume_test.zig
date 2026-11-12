@@ -13,7 +13,6 @@
 const std = @import("std");
 const volume = @import("volume");
 const drawing = @import("drawing");
-const types = @import("types");
 const bar_config = @import("bar_config");
 
 const Probe = volume.Probe;

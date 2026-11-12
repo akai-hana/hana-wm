@@ -11,7 +11,6 @@ const testing = std.testing;
 
 const parser = @import("parser");
 const tiling_sections = @import("tiling_sections");
-const types = @import("types");
 const tiling_config = @import("tiling_config");
 
 fn load(a: std.mem.Allocator, cfg: *tiling_config.Config, src: []const u8) !void {

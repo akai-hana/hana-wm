@@ -14,7 +14,6 @@ const testing = std.testing;
 const color = @import("color");
 const parser = @import("parser");
 const bar_config = @import("bar_config");
-const types = @import("types");
 
 fn load(a: std.mem.Allocator, cfg: *bar_config.Config, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<bar-props-test>");

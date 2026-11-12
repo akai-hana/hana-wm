@@ -10,7 +10,6 @@
 const std = @import("std");
 const slider = @import("slider");
 const level = @import("level");
-const types = @import("types");
 const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const testing = std.testing;
