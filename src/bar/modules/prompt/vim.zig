@@ -296,6 +296,10 @@ fn clearAndYankAll(vs: *EditorState) void {
 /// position, so `p` leaves the cursor where it is and the two coincide.
 fn paste(vs: *EditorState, after: bool) void {
     if (g.yank_len == 0) return;
+    // A full buffer rejects the insert, so advancing first would move the
+    // normal-mode cursor past the last character for a paste that never
+    // happened.
+    if (vs.max_input == 0 or vs.len + 1 >= vs.max_input) return;
     if (after and vs.cursor < vs.len) vs.cursor += 1;
     prompt.insertSlice(vs, g.yank_buf[0..g.yank_len]);
 }
