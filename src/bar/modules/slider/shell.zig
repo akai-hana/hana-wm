@@ -9,12 +9,14 @@
 //! contract THROUGH the registry (`slider_subs`) -- which is why the contract
 //! type is `@TypeOf(subs[0])` rather than `slider.Sub`.
 //!
-//! Interaction: wheel ±2%; left press / press-hold drag sets the level from
-//! the horizontal position; right press is the secondary action (volume
-//! mute). THROTTLING depends on the commit's cost: native commits (ioctl /
-//! sysfs / ALSA ioctls) land immediately; subprocess spawns are rate-limited to
-//! `throttle_ms` and coalesced onto the newest value. Display follows the
-//! optimistic `preview`; backend truth arrives on the next read.
+//! Interaction: wheel steps snap to the 2.5 % detent grid (N0/N2.5/N5/N7.5),
+//! displayed as whole percent with the fraction truncated; left press /
+//! press-hold drag sets the level from the horizontal position; right press is
+//! the secondary action (volume mute). THROTTLING depends on the commit's
+//! cost: native commits (ioctl / sysfs / ALSA ioctls) land immediately;
+//! subprocess spawns are rate-limited to `throttle_ms` and coalesced onto the
+//! newest value. Display follows the optimistic `preview`; backend truth
+//! arrives on the next read.
 
 const std = @import("std");
 const core = @import("core");
@@ -34,7 +36,6 @@ const Sub = @TypeOf(subs[0]);
 
 const pctFromSlot = level.pctFromSlot;
 
-const scroll_step: u8 = 2;
 /// Longest cadence in the registry; a poll deadline closer than this wins
 /// anyway, so this only bounds how far ahead a single wake can be scheduled.
 const max_cadence_ms: i64 = 5000;
@@ -120,6 +121,13 @@ const SubState = struct {
     pending_redraw: bool = false,
     /// Whether this control is currently scrubbed by a press-hold.
     drag: bool = false,
+    /// Wheel cursor in half-percent units, so steps land on the 2.5 % grid
+    /// even though the sub contract (and the label) speak whole percent.
+    /// `scroll_written` is the whole-percent value last handed to the sub
+    /// for this cursor: when the live level stops matching it, a drag or a
+    /// backend read moved the control and the cursor re-seeds from there.
+    scroll_half: u16 = 0,
+    scroll_written: ?u8 = null,
     next_read_ms: i64 = 0,
     /// The control's commit scheduler, pointing at its own write hook.
     /// `subs` is comptime-generated, so the wiring is a comptime loop.
@@ -311,19 +319,27 @@ pub fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
 
 pub fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
     const sub = subs[idx];
-    if (!g_state[idx].armed) return false;
+    const st = &g_state[idx];
+    if (!st.armed) return false;
     if (!subPresent(subs[idx])) return false;
     if (!sub.writable()) return false;
-    const base: u16 = subLevelOrZero(subs[idx]);
-    const new_u: u16 = if (dir > 0)
-        @min(base + scroll_step, 100)
-    else
-        base -| scroll_step;
-    const pct: u8 = @intCast(new_u);
-    // Boundary: the clamped target equals the current level, so this wheel
+    const current = subLevelOrZero(subs[idx]);
+    // Re-seed the detent cursor when the live level no longer matches what
+    // the last wheel step wrote: a drag or a backend read moved the control.
+    var half = st.scroll_half;
+    if (st.scroll_written == null or st.scroll_written.? != current)
+        half = @as(u16, current) * 2;
+    const target_half = level.snapHalfVisible(half, dir, current);
+    // The sub speaks whole percent: truncate the half step for the label and
+    // the backend, but keep the detent in the cursor so the next step
+    // continues from 2.5/7.5 instead of rounding the fraction away.
+    const pct: u8 = @intCast(target_half / 2);
+    st.scroll_half = target_half;
+    st.scroll_written = pct;
+    // Boundary: the clamped detent equals the current level, so this wheel
     // step changes nothing. Claim it without writing or repainting --
     // scrolling at 0/100 % is a true no-op, never backend traffic.
-    if (pct == subLevelOrZero(subs[idx])) return true;
+    if (pct == current) return true;
     // Optimistic display + throttled commit: the label follows immediately
     // while the write is coalesced; truth arrives on the read cadence.
     commitPreview(idx, pct);
