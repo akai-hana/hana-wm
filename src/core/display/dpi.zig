@@ -229,8 +229,8 @@ pub fn scaleFontSizeForHeight(value: types.ScalableValue, screen_height_px: u16)
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);
-    // clampBarHeight, not a bare @max: floor and cap are one policy value to
-    // apply together, so a large `height` can't hand the bar more than the
-    // policy allows.
-    return clampBarHeight(@intFromFloat(scaled_px));
+    // roundToU16 clamps into the u16 range BEFORE the integer cast, so a huge
+    // authored height cannot trap in @intFromFloat; clampBarHeight then applies
+    // the policy floor and cap together.
+    return clampBarHeight(@intCast(scaling.roundToU16(scaled_px, 0.0)));
 }
