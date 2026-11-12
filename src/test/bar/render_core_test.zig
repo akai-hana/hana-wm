@@ -352,6 +352,28 @@ test "paintRowPlan records each clickable bound exactly once at the solved posit
     try testing.expectEqual(plan.slots[4].w, s.clock.segs[ti].width);
 }
 
+test "dirty span unions a leftward extension with the old right edge" {
+    var fx = try Fixture.setup();
+    defer fx.teardown();
+    const s = fx.s;
+
+    // The right cluster is painted right-to-left, so a later segment can
+    // extend the span leftward while still ending before the old right edge.
+    // The union must keep both the new left edge and the old right edge.
+    s.dirty.span_x = 10;
+    s.dirty.span_w = 10; // [10, 20)
+    render.extendDirtySpan(s, 5, 7); // [5, 12)
+    try testing.expectEqual(@as(u16, 5), s.dirty.span_x);
+    try testing.expectEqual(@as(u16, 15), s.dirty.span_w);
+
+    // A rightward extension still grows the span from its existing left edge.
+    s.dirty.span_x = 5;
+    s.dirty.span_w = 15; // [5, 20)
+    render.extendDirtySpan(s, 18, 10); // [18, 28)
+    try testing.expectEqual(@as(u16, 5), s.dirty.span_x);
+    try testing.expectEqual(@as(u16, 23), s.dirty.span_w);
+}
+
 test "scanLiveFrame fills the frame from the model alone" {
     var fx = try Fixture.setup();
     defer fx.teardown();
