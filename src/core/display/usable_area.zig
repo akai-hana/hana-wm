@@ -187,8 +187,8 @@ pub fn workAreaFrom(screen_w: u32, screen_h: u32) model.Rect {
     const left = inset(.left);
     const right = inset(.right);
     return .{
-        .x = @intCast(left),
-        .y = @intCast(top),
+        .x = model.satI16(@intCast(@min(left, screen_w))),
+        .y = model.satI16(@intCast(@min(top, screen_h))),
         .width = @intCast(screen_w -| left -| right),
         .height = @intCast(screen_h -| top -| bottom),
     };
