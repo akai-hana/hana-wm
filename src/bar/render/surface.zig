@@ -18,9 +18,11 @@ fn firstVisualOfDepth(screen: core.Screen, depth: u8) ?*core.xcb.xcb_visualtype_
     return null;
 }
 
-/// Falls back to the root visual if no matching depth is found.
-pub fn findVisualByDepth(screen: core.Screen, depth: u8) u32 {
-    const vt = firstVisualOfDepth(screen, depth) orelse return screen.root_visual;
+/// Returns the visual id for `depth`, or null when the screen has none.
+/// Callers decide the fallback: the bar must drop ARGB, not claim it while
+/// drawing through a 24-bit root visual.
+pub fn findVisualByDepth(screen: core.Screen, depth: u8) ?u32 {
+    const vt = firstVisualOfDepth(screen, depth) orelse return null;
     return vt.visual_id;
 }
 

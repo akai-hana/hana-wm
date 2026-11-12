@@ -120,12 +120,11 @@ pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void 
 /// "is this bar opaque?" from config the caller may be about to replace.
 pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWindowSetup {
     const cs = core.getState();
-    const visual_id = if (want_transparency)
-        surface.findVisualByDepth(cs.screen, 32)
-    else
-        cs.screen.root_visual;
-    const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
-    const colormap: u32 = if (want_transparency) blk: {
+    const argb_visual = if (want_transparency) surface.findVisualByDepth(cs.screen, 32) else null;
+    const has_argb = argb_visual != null;
+    const visual_id = argb_visual orelse cs.screen.root_visual;
+    const depth: u8 = if (has_argb) 32 else xcb.XCB_COPY_FROM_PARENT;
+    const colormap: u32 = if (has_argb) blk: {
         const cmap = xcb.xcb_generate_id(cs.conn);
         _ = xcb.xcb_create_colormap(
             cs.conn,
@@ -139,7 +138,7 @@ pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWind
     const win_id = xcb.xcb_generate_id(cs.conn);
     const value_mask = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL |
         xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
-        if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
+        if (has_argb) xcb.XCB_CW_COLORMAP else 0;
     const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_RELEASE | xcb.XCB_EVENT_MASK_BUTTON_MOTION;
     // value_list slot order must match the CW_* bit order in value_mask above.
@@ -162,7 +161,7 @@ pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWind
     return .{
         .win_id = win_id,
         .visual_id = visual_id,
-        .has_argb = want_transparency,
+        .has_argb = has_argb,
         .colormap = colormap,
     };
 }
