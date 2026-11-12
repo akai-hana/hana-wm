@@ -67,7 +67,7 @@ pub fn utilBetween(prev: Sample, cur: Sample) ?u8 {
     const d_total = cur.total - prev.total;
     if (d_total == 0) return 0;
     const d_idle = cur.idle -| prev.idle;
-    const busy = (d_total - d_idle) * 100 / d_total;
+    const busy = (d_total -| d_idle) * 100 / d_total;
     return @intCast(@min(busy, 100));
 }
 

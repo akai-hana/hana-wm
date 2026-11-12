@@ -223,11 +223,13 @@ fn onPollWakeupFor(comptime idx: usize) void {
     const st = &g_readouts[idx];
     if (!st.armed) return;
     if (core.realtimeMs() < st.next_read_ms) return;
-    // The next deadline is set from the same absent/present decision the poll
-    // itself makes, so the backing-off and the wakeup cannot disagree.
+    // Refresh FIRST: the next deadline must use the absent/present state the
+    // read just produced, not the state before it. Otherwise a readout that
+    // collapses on this tick waits out the old fast cadence, and one that
+    // recovers still carries the old slow deadline.
+    if (refresh(idx)) st.pending_redraw = true;
     st.next_read_ms = core.realtimeMs() +
         (if (st.absent) absent_reprobe_ms else readIntervalMs());
-    if (refresh(idx)) st.pending_redraw = true;
 }
 
 /// A redraw is owed for either reason the segment can change shape: the
@@ -237,7 +239,8 @@ fn consumeRedrawRequestFor(comptime idx: usize) bool {
     const st = &g_readouts[idx];
     const p = st.pending_redraw;
     st.pending_redraw = false;
-    return p or widthStateFor(idx).consumeRedrawRequest();
+    const width = widthStateFor(idx).consumeRedrawRequest();
+    return p or width;
 }
 
 fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {

@@ -149,6 +149,14 @@ test "utilBetween reports 0 for a fully idle interval" {
     try std.testing.expectEqual(@as(?u8, 0), cpu.utilBetween(a, b));
 }
 
+test "utilBetween clamps an idle delta larger than the total delta" {
+    // Defensive: a malformed or partially rewound sample must not underflow
+    // the busy calculation into a panic.
+    const a: cpu.Sample = .{ .total = 100, .idle = 10 };
+    const b: cpu.Sample = .{ .total = 110, .idle = 200 };
+    try std.testing.expectEqual(@as(?u8, 0), cpu.utilBetween(a, b));
+}
+
 test "parseRamField extracts the value" {
     const s = "MemTotal:       16299896 kB\nMemAvailable:    12345678 kB\nMemFree:          111 kB\n";
     try std.testing.expectEqual(@as(?u64, 16299896), ram.parseRamField(s, "MemTotal:"));
