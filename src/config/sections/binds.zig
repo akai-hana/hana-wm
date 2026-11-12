@@ -67,7 +67,10 @@ fn appendExpandedEntry(
 ) !void {
     if (entries.items.len >= max_glob_expansion) return;
     const k = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, token, suffix });
-    try entries.append(allocator, .{ .key = k, .ws_idx = @intCast(entries.items.len + 1), .owned = true });
+    entries.append(allocator, .{ .key = k, .ws_idx = @intCast(entries.items.len + 1), .owned = true }) catch |err| {
+        allocator.free(k);
+        return err;
+    };
 }
 
 /// Expands a single-char range token (e.g. "1-4"), appending one entry per
@@ -170,9 +173,14 @@ fn actionFromValue(
                 for (acts.items) |*a| a.deinit(allocator);
                 acts.deinit(allocator);
             }
-            for (items) |elem|
-                if (elem.asScalar([]const u8)) |cmd|
-                    try acts.append(allocator, try resolveElement(allocator, cmd, ws_idx, kill));
+            for (items) |elem| {
+                const cmd = elem.asScalar([]const u8) orelse continue;
+                var act = try resolveElement(allocator, cmd, ws_idx, kill);
+                acts.append(allocator, act) catch |err| {
+                    act.deinit(allocator);
+                    return err;
+                };
+            }
             // A non-empty array whose elements were all non-strings
             // filters down to zero actions; return null (no binding) instead
             // of a dead empty sequence.
@@ -261,7 +269,13 @@ fn resolveElement(
         for (group.items) |*a| a.deinit(allocator);
         group.deinit(allocator);
     }
-    for (frags.items) |frag| try group.append(allocator, try resolveAndParseAction(allocator, frag, ws_idx, kill));
+    for (frags.items) |frag| {
+        var act = try resolveAndParseAction(allocator, frag, ws_idx, kill);
+        group.append(allocator, act) catch |err| {
+            act.deinit(allocator);
+            return err;
+        };
+    }
     return .{ .parallel = try group.toOwnedSlice(allocator) };
 }
 
@@ -318,8 +332,14 @@ pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg
                 log.warn("Keybind '{s}': a `,`-sequence exec step blocks the WM until the command exits (bounded, but avoid long-running commands here)", .{keybind_str});
             }
             switch (bind) {
-                .mouse => |mb| try cfg.mouse_bindings.append(allocator, .{ .modifiers = mb.modifiers, .button = mb.button, .action = action }),
-                .keyboard => |kb| try cfg.keybindings.append(allocator, .{ .modifiers = kb.modifiers, .keysym = kb.keysym, .action = action }),
+                .mouse => |mb| cfg.mouse_bindings.append(allocator, .{ .modifiers = mb.modifiers, .button = mb.button, .action = action }) catch |err| {
+                    action.deinit(allocator);
+                    return err;
+                },
+                .keyboard => |kb| cfg.keybindings.append(allocator, .{ .modifiers = kb.modifiers, .keysym = kb.keysym, .action = action }) catch |err| {
+                    action.deinit(allocator);
+                    return err;
+                },
             }
         }
     }
