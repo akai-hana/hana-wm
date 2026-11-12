@@ -101,11 +101,15 @@ pub fn capture(
     // `info`/`debug` progress chatter could never pass.
     if (level != .warn and level != .err) return;
     const message = std.fmt.allocPrint(c.allocator, format, args) catch {
-        c.items.append(c.allocator, .{
-            .level = level,
-            .module = c.allocator.dupe(u8, "diagnostics") catch return,
-            .message = c.allocator.dupe(u8, "(diagnostic text could not be allocated)") catch return,
-        }) catch return;
+        const module = c.allocator.dupe(u8, "diagnostics") catch return;
+        const fallback = c.allocator.dupe(u8, "(diagnostic text could not be allocated)") catch {
+            c.allocator.free(module);
+            return;
+        };
+        c.items.append(c.allocator, .{ .level = level, .module = module, .message = fallback }) catch {
+            c.allocator.free(module);
+            c.allocator.free(fallback);
+        };
         return;
     };
     const tag = c.allocator.dupe(u8, @tagName(scope)) catch {
@@ -114,5 +118,6 @@ pub fn capture(
     };
     c.items.append(c.allocator, .{ .level = level, .module = tag, .message = message }) catch {
         c.allocator.free(message);
+        c.allocator.free(tag);
     };
 }

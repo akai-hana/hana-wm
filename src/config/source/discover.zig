@@ -213,7 +213,11 @@ fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.Arr
             if (entry.kind == .directory) continue;
             if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
             if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
-            try names.append(allocator, try allocator.dupe(u8, entry.name));
+            const name = try allocator.dupe(u8, entry.name);
+            names.append(allocator, name) catch |err| {
+                allocator.free(name);
+                return err;
+            };
         }
     }
     if (names.items.len == 0) {
