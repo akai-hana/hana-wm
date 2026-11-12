@@ -381,10 +381,9 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
             // Immediate bar unmap when fullscreen claims the usable area.
             surfaces.hideBarForFullscreen();
         } else {
-            // Exit: deferred bar show.
-            if (m.focused) |w| {
-                registry.dispatchAll(.armPendingBarShow, .{w});
-            }
+            // Exit: deferred bar show, keyed to the window whose
+            // ConfigureNotify confirms the transition.
+            registry.dispatchAll(.armPendingBarShow, .{win});
         }
     }
 
