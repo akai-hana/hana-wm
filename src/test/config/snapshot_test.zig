@@ -428,3 +428,48 @@ test "P2-66: an unwritable runtime dir logs the failed refresh" {
     // saw unrelated chatter cannot make the assertion pass.
     try testing.expect(diag.contains("keeping the previous snapshot"));
 }
+
+test "an include outside the config root is not snapshotted" {
+    const alloc = testing.allocator;
+    var box = try Sandbox.init(alloc, "outside");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    // The include resolves against hana/ but names a sibling tree. Copying it
+    // verbatim into the snapshot staging dir (runtime/hana-config) would join
+    // "../hana2/shared.toml" into runtime/hana2/shared.toml -- outside the
+    // snapshot root -- so the snapshot must skip it instead.
+    try box.write("hana/config.toml",
+        \\include = ["../hana2/shared.toml"]
+        \\[binds]
+        \\Mod = "Mod4"
+    );
+    try box.write("hana2/shared.toml", "[bar]\nvisible = true\n");
+
+    defer config.deinitGoodSource(alloc);
+    var source: config.DefaultSource = .fallback;
+    var cfg = try config.loadConfigDefault(alloc, &source, false);
+    defer cfg.deinit(alloc);
+    try testing.expectEqual(config.DefaultSource.user, source);
+    config.refreshSnapshot(alloc);
+
+    const snap = try box.snapshotDir(alloc);
+    defer alloc.free(snap);
+    const got = try Sandbox.treeFiles(alloc, snap);
+    defer freeTree(alloc, got);
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("config.toml", got[0]);
+
+    const escape = try std.fmt.allocPrint(alloc, "{s}/hana2/shared.toml", .{box.runtime});
+    defer alloc.free(escape);
+    const escaped = std.Io.Dir.openFileAbsolute(snapio, escape, .{}) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (escaped) |f| {
+        f.close(snapio);
+        return error.TestUnexpectedResult;
+    }
+}

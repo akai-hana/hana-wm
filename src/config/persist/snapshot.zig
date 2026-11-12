@@ -208,9 +208,22 @@ const SnapFile = struct { rel: []const u8, stamp: FileStamp };
 /// same way the original load did.
 fn relativeTo(allocator: std.mem.Allocator, root: []const u8, path: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, path, root)) return null;
+    // A bare prefix is not containment: root "/x/hana" must not claim
+    // "/x/hana2/shared.toml". The next byte has to be a separator (or the
+    // path has to end exactly at root, which is not a file inside it).
+    if (path.len == root.len or !std.fs.path.isSep(path[root.len])) return null;
     var rel = path[root.len..];
     while (rel.len != 0 and std.fs.path.isSep(rel[0])) rel = rel[1..];
     if (rel.len == 0) return null;
+    // Lexical containment is not enough: an include may be "../shared.toml",
+    // and joining it with the config root keeps the prefix while the `..`
+    // escapes it. Reject dot components so a snapshot path can never walk
+    // out of the staging tree.
+    var components = std.mem.splitScalar(u8, rel, std.fs.path.sep);
+    while (components.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
+            return null;
+    }
     return try allocator.dupe(u8, rel);
 }
 
@@ -239,7 +252,10 @@ fn snapshotCurrent(
     var seen: std.ArrayList([]const u8) = .empty;
     while (w.next(io) catch return false) |entry| {
         if (entry.kind == .directory) continue;
-        seen.append(allocator, entry.path) catch return false;
+        // Walker.Entry.path is invalidated by the next walker step (and by
+        // deinit), so keep a copy in the arena rather than the entry's slice.
+        const path = allocator.dupe(u8, entry.path) catch return false;
+        seen.append(allocator, path) catch return false;
     }
     if (seen.items.len != files.len) return false;
     for (files) |f| {
@@ -334,8 +350,13 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
 
     // Remember what was frozen so the next unchanged reload can skip all of
     // it. `g.files` shares its backing with `last_good_source`, so stamping
-    // through it records the freeze without a second allocation.
-    for (g.files, files.items) |*sf, f| sf.stamp = f.stamp;
+    // through it records the freeze without a second allocation. A skipped
+    // outside-root include makes the lists differ; leave the stamps null in
+    // that case (the next refresh just copies again) rather than zipping
+    // mismatched lengths.
+    if (files.items.len == g.files.len) {
+        for (g.files, files.items) |*sf, f| sf.stamp = f.stamp;
+    }
 }
 
 /// Assembles the complete snapshot under `staging`. Returns false (leaving
