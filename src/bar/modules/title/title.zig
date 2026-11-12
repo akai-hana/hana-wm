@@ -59,6 +59,17 @@ const scroller: ?Scroller = if (subs.len != 0) subs[0] else null;
 fn noPivot() void {}
 const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
 
+/// Retire the marquee when no focused cell was drawn this frame. Without this
+/// a title that disappears (workspace emptied, focused title cleared) leaves
+/// the carousel's `scrolling` bit and `scroll_active` set, so the bar keeps
+/// waking and repainting a slot that no longer has anything to animate.
+fn retireScroller(config: *const bar_config.Config) void {
+    if (scroller) |s| {
+        _ = s.offsetFor(0, "", 0, 0, false, 0, config.carousel_gap_px, core.monotonicMs());
+        g.scroll_active = false;
+    }
+}
+
 // The prompt overlays this slot when active: it binds a runtime-overlay value
 // (contract.BarOverlay) on its Segment, found through the bar segment registry.
 const overlay: ?contract.BarOverlay = if (dispatch.providerOf(contract.Segment, segmod.all(), .overlay)) |m|
@@ -90,6 +101,7 @@ fn drawInner(
     // make a render mutate the state the next frame's pacing depends on.
     const window_count = snapshot.entries.len;
     if (window_count == 0) {
+        retireScroller(ctx.config);
         ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
     } else if (window_count == 1) {
         drawSingleWindow(ctx, snapshot);
@@ -117,22 +129,9 @@ fn drawSingleWindow(
     // branches differ in fg and in the scroll gate, so they are not one if/else.
     if (is_minimized) {
         // The minimized cell never consults the scroller, but a marquee the
-        // pre-minimize frame left live would keep repainting; one retiring call
-        // (enabled=false) stops it and clears the poll deadline.
-        if (scroller) |s| {
-            const title_width = if (snapshot.minimized_title.len > 0) ctx.dc.measureTextWidth(snapshot.minimized_title) else 0;
-            _ = s.offsetFor(
-                single_win,
-                snapshot.minimized_title,
-                title_width,
-                text_geom.avail_w,
-                false,
-                0,
-                ctx.config.carousel_gap_px,
-                core.monotonicMs(),
-            );
-            g.scroll_active = false;
-        }
+        // pre-minimize frame left live would keep repainting; one retiring
+        // call stops it and clears the poll deadline.
+        retireScroller(ctx.config);
         if (snapshot.minimized_title.len > 0)
             drawFittedTitle(
                 ctx,
@@ -146,7 +145,10 @@ fn drawSingleWindow(
         return;
     }
 
-    if (snapshot.focused_title.len == 0) return;
+    if (snapshot.focused_title.len == 0) {
+        retireScroller(ctx.config);
+        return;
+    }
 
     const fg = if (workspace_has_focus) ctx.config.selected_fg else ctx.config.fg;
     drawFittedTitle(
@@ -252,12 +254,16 @@ fn drawSegmentedTitles(
     // No empty-workspace guard here: `drawInner` has already dispatched the
     // zero case, so the gather cannot see an empty list from this path.
     var scratch: geom.GatherScratch = .{};
-    const sorted = scratch.gather(snapshot) orelse return;
+    const sorted = scratch.gather(snapshot) orelse {
+        retireScroller(ctx.config);
+        return;
+    };
 
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
 
+    var focused_handled = false;
     for (sorted, 0..) |info, i| {
         const bounds = geom.segmentBounds(ctx.width, i, window_count);
         if (bounds.w == 0) continue;
@@ -272,7 +278,13 @@ fn drawSegmentedTitles(
         );
         ctx.dc.fillRect(segment_x, 0, bounds.w, ctx.height, accent);
 
-        if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
+        if (info.title.len == 0 or bounds.w <= min_cell_w) {
+            if (is_focused_win) {
+                retireScroller(ctx.config);
+                focused_handled = true;
+            }
+            continue;
+        }
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
         drawFittedTitle(
@@ -284,7 +296,11 @@ fn drawSegmentedTitles(
             text_fg,
             is_focused_win,
         );
+        if (is_focused_win) focused_handled = true;
     }
+    // No focused cell was drawable (no focus, unknown geometry, or a
+    // zero-width tile): retire any marquee left over from the previous frame.
+    if (!focused_handled) retireScroller(ctx.config);
 }
 
 // Segment hooks
