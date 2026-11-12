@@ -51,6 +51,7 @@ pub const registerHandlers = editor.registerHandlers;
 // Completion re-exports: `wordAtCursor` is the pure token-under-cursor
 // split, pinned by completion_test.zig through the package core.
 pub const wordAtCursor = completion.wordAtCursor;
+pub const historyCompletion = completion.historyCompletion;
 pub const CompletionSource = completion.CompletionSource;
 pub const handleInsertBasic = editor.handleInsertBasic;
 const default_max_input = editor.default_max_input;
@@ -144,6 +145,10 @@ fn init(
     g.handlers = @ptrCast(@alignCast(bar_handlers));
     g.allocator = allocator;
     g.vim_state = try EditorState.init(allocator, default_max_input);
+    // A failed addon init must leave no half-built prompt behind: otherwise
+    // the early "already initialised" return below would skip the addon on
+    // the next attempt, and the key-symbol/editor allocations would leak.
+    errdefer deinit(allocator);
     // The segment hook's connection is `*const anyopaque` (contract is
     // X-free); the one segment that needs it casts back to the real handle.
     g.key_syms = xcb_key_symbols_alloc(@ptrCast(@constCast(conn)));

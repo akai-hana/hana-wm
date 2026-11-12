@@ -144,6 +144,24 @@ test "yank/paste register round-trip" {
     try testing.expectEqual(@as(usize, 4), es.len);
 }
 
+test "paste into a full buffer does not move the cursor" {
+    var es = try typed(testing.allocator, "abc");
+    defer es.deinit();
+
+    norm(&es, 'y');
+    norm(&es, 'y');
+    var fill: [60]u8 = @splat('x');
+    prompt.insertSlice(&es, &fill);
+    try testing.expectEqual(@as(usize, 63), es.len);
+
+    es.cursor = 1;
+    norm(&es, 'p');
+    try testing.expectEqual(@as(usize, 63), es.len);
+    // The insert was rejected, so the "paste after" cursor step must not
+    // have happened either.
+    try testing.expectEqual(@as(usize, 1), es.cursor);
+}
+
 test "cw range-replaces into insert mode" {
     var es = try typed(testing.allocator, "one two");
     defer es.deinit();

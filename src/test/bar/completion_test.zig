@@ -92,3 +92,18 @@ test "CompletionSource names both lookup strategies the union replaced" {
     // rather than a source that is never consulted.
     try testing.expectEqual(@as(usize, 2), @typeInfo(prompt.CompletionSource).@"enum".fields.len);
 }
+
+test "history completion matches the token under the cursor, not the first word" {
+    // A multi-word history line must complete its last word. Comparing the
+    // history entry's first byte against the token rejected every such match
+    // before the token split was even consulted.
+    const tail = prompt.historyCompletion("ch", "git checkout") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("eckout", tail);
+    const arg = prompt.historyCompletion("ma", "git checkout main") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("in", arg);
+
+    // An exact match has nothing left to ghost, and a different last word is
+    // not a completion just because the first word matches.
+    try testing.expect(prompt.historyCompletion("checkout", "git checkout") == null);
+    try testing.expect(prompt.historyCompletion("ch", "git commit") == null);
+}
