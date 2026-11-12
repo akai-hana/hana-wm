@@ -16,6 +16,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const drawing = @import("drawing");
+const fonts = @import("fonts");
 const bar_config = @import("bar_config");
 
 test "P2-60: repeated measure of one label is one Pango measure" {
@@ -109,4 +110,14 @@ test "P2-64: a segment's configured size is its own cache key" {
     // The unsized measure of the same text is distinct from both.
     _ = dc.fonts.measureTextWidth(label);
     try testing.expectEqual(@as(u32, 3), dc.fonts.measure_misses);
+}
+
+test "SizedFontList.build frees every partial entry when an allocation fails" {
+    const names = [_][]const u8{ "Sans", "Serif", "Monospace" };
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, font_names: []const []const u8) !void {
+            var sized = try fonts.SizedFontList.build(allocator, font_names, 10);
+            sized.deinit();
+        }
+    }.run, .{&names});
 }

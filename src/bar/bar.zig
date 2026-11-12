@@ -169,6 +169,11 @@ pub fn init() !void {
     const m = metrics.resolveBarMetrics();
     const bar = try createBar(m, barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, m.height));
     gBar.state = bar.state;
+    // A segment init can fail (prompt's editor/addon setup allocates). Once
+    // the state is installed, a failure must tear the whole bar back down:
+    // leaving a mapped window and half-initialised modules alive would make
+    // the caller's logged init failure look like a working bar.
+    errdefer deinit();
     usable_area.setSurfaceWindow(bar.setup.win_id);
     // Map before the first draw (same rationale as applyVisibility: a blit
     // to an unmapped window is discarded, and compositors start remapped
