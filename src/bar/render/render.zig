@@ -189,13 +189,12 @@ pub inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
         self.dirty.span_x = x;
         self.dirty.span_w = w;
     } else {
-        const end: u32 = @as(u32, self.dirty.span_x) + self.dirty.span_w;
+        const old_end: u32 = @as(u32, self.dirty.span_x) + self.dirty.span_w;
         const new_end: u32 = x32 + w32;
-        if (x < self.dirty.span_x) self.dirty.span_x = x;
-        if (new_end > end) {
-            const new_w: u32 = new_end - @as(u32, self.dirty.span_x);
-            self.dirty.span_w = @intCast(@min(new_w, std.math.maxInt(u16)));
-        }
+        const union_start = @min(x32, @as(u32, self.dirty.span_x));
+        const union_end = @max(new_end, old_end);
+        self.dirty.span_x = @intCast(union_start);
+        self.dirty.span_w = @intCast(@min(union_end - union_start, std.math.maxInt(u16)));
     }
 }
 
