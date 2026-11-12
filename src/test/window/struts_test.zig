@@ -40,6 +40,22 @@ test "struts: parse reads the four edge widths and ignores the partial ranges" {
     try testing.expectEqual(@as(u16, 40), insets.bottom);
 }
 
+test "struts: oversized edge widths clamp instead of trapping" {
+    // Strut widths are client-controlled CARDINALs; a value past u16 must not
+    // reach an @intCast trap. The usable-area ledger saturates the result to a
+    // zero-sized axis.
+    const data = [_]u32{
+        std.math.maxInt(u32), 70_000, 65_536, 65_535,
+        0,                    0,      0,      0,
+        0,                    0,      0,      0,
+    };
+    const insets = struts.parsePartial(&data).?;
+    try testing.expectEqual(std.math.maxInt(u16), insets.left);
+    try testing.expectEqual(std.math.maxInt(u16), insets.right);
+    try testing.expectEqual(std.math.maxInt(u16), insets.top);
+    try testing.expectEqual(std.math.maxInt(u16), insets.bottom);
+}
+
 test "struts: a payload that is not the EWMH layout is dropped, never guessed" {
     // format=32 lets a client send any length; a 4-value list looks like the
     // old _NET_WM_STRUT shape, and guessing the rest would invent insets the

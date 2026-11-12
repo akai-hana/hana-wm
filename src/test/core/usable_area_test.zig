@@ -56,6 +56,19 @@ test "a claim larger than the screen saturates to zero, never wraps" {
     try testing.expectEqual(@as(u16, 1920), wa.width);
 }
 
+test "an inset wider than i16 saturates the coordinate, never traps" {
+    // A dock can declare any u16 strut. The work-area origin is an i16, so an
+    // unchecked @intCast here is a client-triggered panic; the coordinate must
+    // clamp and the over-claimed axis must stay zero-sized.
+    defer _ = usable_area.releaseDockClaim(0x5000FF);
+    try testing.expect(usable_area.setDockClaim(0x5000FF, 50_000, 0, 40_000, 0));
+    const wa = usable_area.workAreaFrom(1920, 1080);
+    try testing.expectEqual(@as(i16, 1920), wa.x);
+    try testing.expectEqual(@as(i16, 1080), wa.y);
+    try testing.expectEqual(@as(u16, 0), wa.width);
+    try testing.expectEqual(@as(u16, 0), wa.height);
+}
+
 test "a claim exactly the screen height is zero, not negative-and-wrapped" {
     // The boundary case. `-|` saturates at 0, so this lands on the same
     // zero-sized answer as an oversized claim rather than underflowing.

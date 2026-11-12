@@ -29,6 +29,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const atoms = @import("atoms");
 const icccm = @import("icccm");
+const scaling = @import("scaling");
 const usable_area = @import("usable_area");
 
 /// The four edge widths of a strut, in pixels.
@@ -46,10 +47,10 @@ pub const Insets = struct {
 pub fn parsePartial(data: []const u32) ?Insets {
     if (data.len < 12) return null;
     return .{
-        .left = @intCast(data[0]),
-        .right = @intCast(data[1]),
-        .top = @intCast(data[2]),
-        .bottom = @intCast(data[3]),
+        .left = scaling.clampToU16(data[0]),
+        .right = scaling.clampToU16(data[1]),
+        .top = scaling.clampToU16(data[2]),
+        .bottom = scaling.clampToU16(data[3]),
     };
 }
 
