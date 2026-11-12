@@ -72,7 +72,10 @@ pub fn resolve(in: Inputs, probe: Probe) Metrics {
     // anyway.
     const total = probe(base) orelse
         return .{ .font_size = base, .height = scale.bar_height_policy.default_px };
-    return .{ .font_size = base, .height = scale.clampBarHeight(@intCast(@max(1, total))) };
+    // Probe is a public callback: cap before the i32 cast so an outsized
+    // measurement cannot trap in ReleaseFast. The policy clamp then caps it.
+    const measured: i32 = @intCast(@min(total, std.math.maxInt(i32)));
+    return .{ .font_size = base, .height = scale.clampBarHeight(@max(1, measured)) };
 }
 
 /// The font size a percentage configuration means at `bar_height`: the

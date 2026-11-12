@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const dpi = @import("dpi");
+const types = @import("types");
 
 fn expectClose(expected: f32, actual: f32) !void {
     try testing.expect(@abs(expected - actual) < 0.01);
@@ -79,4 +80,11 @@ test "parseXftDpi matches the real key after a decoy sharing its tail" {
     try testing.expect(dpi.parseXftDpi("Xft.dpi2:\t96") == null);
     // Repeated occurrences: the first LINE-START match is the one that counts.
     try expectClose(96.0, dpi.parseXftDpi("Xft.dpi:\t96\nXft.dpi:\t144").?);
+}
+
+test "scaleBarHeight clamps huge authored values instead of trapping" {
+    // A pathological absolute height must reach the policy clamp, not trap in
+    // @intFromFloat on the way there.
+    try testing.expectEqual(dpi.bar_height_policy.max_px, dpi.scaleBarHeight(types.ScalableValue.absolute(1e30), 1080));
+    try testing.expectEqual(dpi.bar_height_policy.min_px, dpi.scaleBarHeight(types.ScalableValue.absolute(-1e30), 1080));
 }

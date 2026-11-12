@@ -70,6 +70,19 @@ test "an auto-sized height is still capped by the policy" {
     try std.testing.expectEqual(policy.max_px, m.height);
 }
 
+test "an outsized probe clamps instead of trapping" {
+    const huge: metrics.Probe = struct {
+        fn p(_: u16) ?u32 {
+            return std.math.maxInt(u32);
+        }
+    }.p;
+    const m = metrics.resolve(.{
+        .font_size = px.absolute(10),
+        .screen_height = 1080,
+    }, huge);
+    try std.testing.expectEqual(policy.max_px, m.height);
+}
+
 test "an unmeasurable font falls back to the policy default, not to a crash" {
     const m = metrics.resolve(.{
         .font_size = px.absolute(10),
