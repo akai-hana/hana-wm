@@ -237,6 +237,7 @@ pub const Master = struct {
 
     /// Reads the level as 0-100 (channel 0).
     pub fn readVolumePct(self: *const Master) ?u8 {
+        if (self.count == 0) return null;
         var values: [128]c_long = undefined;
         if (!readElem(self.fd, self.numid, &values)) return null;
         return pctFromRaw(values[0], self.min, self.max);
@@ -322,12 +323,13 @@ fn masterOn(fd: c_int) ?Master {
 
     const vol = find(elems, "Master Playback Volume") orelse find(elems, "Master") orelse return null;
     const vi = elemInfo(fd, vol) orelse return null;
-    if (!usable(vi, SNDRV_CTL_ELEM_TYPE_INTEGER)) return null;
+    if (!usable(vi, SNDRV_CTL_ELEM_TYPE_INTEGER) or vi.count == 0) return null;
 
     const switch_numid: c_uint = blk: {
         const sw = find(elems, "Master Playback Switch") orelse break :blk 0;
         const si = elemInfo(fd, sw) orelse break :blk 0;
-        break :blk if (usable(si, SNDRV_CTL_ELEM_TYPE_BOOLEAN)) si.id.numid else 0;
+        if (!usable(si, SNDRV_CTL_ELEM_TYPE_BOOLEAN) or si.count == 0) break :blk 0;
+        break :blk si.id.numid;
     };
     return .{
         .fd = fd,

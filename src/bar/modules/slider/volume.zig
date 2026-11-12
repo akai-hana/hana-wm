@@ -191,7 +191,10 @@ fn readVolume() bool {
         }
     }
     g.failed_at_ms = core.realtimeMs();
-    if (!g.warned) log.warn("volume: no usable backend (pactl, amixer and /dev/snd/controlC* all failed); showing MUTE", .{});
+    if (!g.warned) log.warn(
+        "volume: no usable backend (pactl, amixer and /dev/snd/controlC* all failed); {s}",
+        .{if (g.has_value) "keeping the last reading" else "showing MUTE"},
+    );
     g.warned = true;
     return false;
 }
