@@ -398,6 +398,7 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
     for (src) |w| {
         if (!m.store.has(w)) continue;
         if (list.len >= cap) break;
+        if (list.indexOfScalar(w) != null) continue;
         _ = list.append(w);
     }
 }

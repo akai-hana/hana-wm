@@ -176,6 +176,29 @@ test "F10: applyModelLevel restores focus, workspace state and every membership"
     try testing.expect(model.visibleOn(&restored, 3, model.findHome(&restored, 3).?));
 }
 
+test "F10: applyModelLevel drops duplicate tiled_order and mru entries" {
+    var src = helpers.makeModel();
+    try buildFixtureModel(&src);
+
+    // A corrupt or hand-edited handoff can list the same window twice. The
+    // restore path must keep one seat per list, not make findHome lie.
+    try testing.expect(src.ws[0].tiled_order.append(1));
+    try testing.expect(src.ws[0].tiled_order.append(2));
+    try testing.expect(src.ws[0].focus_mru.append(1));
+
+    var f = try scratch.TmpFile.init("apply_dupes");
+    defer f.deinit();
+    try session.save(testing.allocator, &src, f.path());
+    try testing.expect(session.loadToGlobal(page_alloc, f.path()));
+
+    var restored = helpers.makeModel();
+    try registerSurvivors(&restored);
+    session.applyModelLevel(&restored);
+
+    try testing.expectEqualSlices(model.WindowId, &.{ 2, 1 }, restored.ws[0].tiled_order.constSlice());
+    try testing.expectEqualSlices(model.WindowId, &.{1}, restored.ws[0].focus_mru.constSlice());
+}
+
 test "F10: applyModelLevel leaves minimized (parked) windows out of tiled_order" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
