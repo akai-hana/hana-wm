@@ -392,7 +392,13 @@ pub const SizedFontList = struct {
 
     pub fn build(allocator: std.mem.Allocator, fonts: []const []const u8, font_size: u16) !SizedFontList {
         const items = try allocator.alloc([]const u8, fonts.len);
-        errdefer allocator.free(items);
+        // A later allocPrint can fail after earlier entries were copied; free
+        // those partial entries too, not just the outer slice.
+        var built: usize = 0;
+        errdefer {
+            for (items[0..built]) |s| allocator.free(s);
+            allocator.free(items);
+        }
         for (fonts, items) |f, *out| {
             // Even at font_size 0 this COPIES rather than borrowing: every
             // entry must be owned for deinit to need no inference.
@@ -400,6 +406,7 @@ pub const SizedFontList = struct {
                 try std.fmt.allocPrint(allocator, "{s}:size={}", .{ f, font_size })
             else
                 try allocator.dupe(u8, f);
+            built += 1;
         }
         return .{ .allocator = allocator, .items = items };
     }

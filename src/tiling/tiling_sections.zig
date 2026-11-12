@@ -31,7 +31,11 @@ fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: 
 /// Appends one layout name (duped) to the tiling layout cycle -- the seed both the
 /// default config and the single-layout parse path use.
 pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *tiling_config.Config, name: []const u8) !void {
-    try cfg.layouts.append(allocator, try allocator.dupe(u8, name));
+    const copy = try allocator.dupe(u8, name);
+    cfg.layouts.append(allocator, copy) catch |err| {
+        allocator.free(copy);
+        return err;
+    };
 }
 
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
@@ -263,7 +267,11 @@ fn parseLayoutsArray(
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.layouts.items.len);
-        try cfg.layouts.append(allocator, try allocator.dupe(u8, name_canon));
+        const copy = try allocator.dupe(u8, name_canon);
+        cfg.layouts.append(allocator, copy) catch |err| {
+            allocator.free(copy);
+            return err;
+        };
 
         // Optional trailing group: a workspace list and/or variants word.
         if (try parseLayoutTrailing(allocator, cfg, name_canon, arr, &i)) |trail| {

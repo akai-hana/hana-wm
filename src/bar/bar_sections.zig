@@ -31,9 +31,23 @@ const bar_anchors = [_]BarAnchorInfo{
 pub fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *bar_config.Config) !void {
     for (bar_anchors) |a| {
         var layout = bar_config.BarLayout{ .position = a.position, .segments = .empty };
-        try layout.segments.append(allocator, try allocator.dupe(u8, a.default_seg));
+        errdefer layout.deinit(allocator);
+        try appendOwnedString(allocator, &layout.segments, try allocator.dupe(u8, a.default_seg));
         try cfg.layout.append(allocator, layout);
     }
+}
+
+/// Appends an already-owned string, freeing it when the list append fails so a
+/// caller never has to repeat the cleanup at every dup-and-append site.
+fn appendOwnedString(
+    allocator: std.mem.Allocator,
+    dst: *std.ArrayList([]const u8),
+    owned: []u8,
+) !void {
+    dst.append(allocator, owned) catch |err| {
+        allocator.free(owned);
+        return err;
+    };
 }
 
 /// `appendDupedStrings`'s comptime `warn` argument: segment list warns on a
@@ -55,12 +69,12 @@ fn appendDupedStrings(
     var skipped = false;
     for (items) |item| {
         if (item.asScalar([]const u8)) |s| {
-            try dst.append(allocator, try allocator.dupe(u8, s));
+            try appendOwnedString(allocator, dst, try allocator.dupe(u8, s));
             continue;
         }
         if (comptime ints_as_numbers) {
             if (item.asScalar(i64)) |n| {
-                try dst.append(allocator, try dupeNum(allocator, n));
+                try appendOwnedString(allocator, dst, try dupeNum(allocator, n));
                 continue;
             }
         }
@@ -110,7 +124,7 @@ fn workspaceCountFromDoc(doc: *parser.Document) u8 {
 pub fn padWorkspaceIcons(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar_config.Config) !void {
     const count = workspaceCountFromDoc(doc);
     while (cfg.workspace_icons.items.len < count) {
-        try cfg.workspace_icons.append(allocator, try dupeNum(allocator, cfg.workspace_icons.items.len + 1));
+        try appendOwnedString(allocator, &cfg.workspace_icons, try dupeNum(allocator, cfg.workspace_icons.items.len + 1));
     }
 }
 
@@ -132,7 +146,7 @@ fn parseWorkspaceIcons(
         var ch_buf: [1]u8 = undefined;
         for (str) |ch| {
             ch_buf[0] = ch;
-            try cfg.workspace_icons.append(allocator, try allocator.dupe(u8, &ch_buf));
+            try appendOwnedString(allocator, &cfg.workspace_icons, try allocator.dupe(u8, &ch_buf));
         }
     }
 
@@ -150,6 +164,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar
     for (bar_anchors) |a| {
         const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ types.section_prefix_bar_layout, a.name }) catch unreachable) orelse continue;
         var bar_layout = bar_config.BarLayout{ .position = a.position, .segments = .empty };
+        errdefer bar_layout.deinit(allocator);
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr| {
             // BEFORE the append: a rejection leaves this row unallocated
             // (prior rows free through composed.parse's errdefer chain).
