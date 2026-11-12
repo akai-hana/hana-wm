@@ -257,8 +257,8 @@ pub fn drainPendingSpawns() void {
                     _ = c.close(fd);
                     entry.spawn_fd = null;
                 }
-            } else if (n < 0 and std.posix.errno(n) == .AGAIN) {
-                // Not ready yet; retry on the next call.
+            } else if (n < 0 and (std.posix.errno(n) == .AGAIN or std.posix.errno(n) == .INTR)) {
+                // Not ready yet (or interrupted); retry on the next call.
             } else {
                 // EOF (n == 0) or a hard read error: conversation is over.
                 _ = c.close(fd);
