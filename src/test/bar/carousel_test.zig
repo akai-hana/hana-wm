@@ -328,3 +328,15 @@ test "disabled carousel stays inactive even when the text overflows" {
     // And it does not poll for frames while disabled.
     try testing.expectEqual(@as(i32, -1), carousel.pollDeadlineMs(1000, 60.0));
 }
+
+test "a disabled frame retires an active marquee" {
+    reset();
+    _ = tick(5, 500, 100, 30, 1000);
+    try testing.expect(carousel.pollDeadlineMs(1000, 60.0) >= 1);
+
+    // The title module calls this shape when the focused cell disappears:
+    // one disabled frame must clear both the scroll state and the deadline.
+    const stopped = carousel.offsetFor(0, "", 0, 0, false, 0, gap_px, 1100);
+    try testing.expect(!stopped.active);
+    try testing.expectEqual(@as(i32, -1), carousel.pollDeadlineMs(1100, 60.0));
+}
