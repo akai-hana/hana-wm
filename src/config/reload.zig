@@ -74,7 +74,7 @@ pub fn handleConfigReload() !void {
     // points at: the pin stays set for the whole process lifetime after the
     // first reload_hana, and honoring it here would re-read the frozen
     // last-good snapshot instead of the user's freshly edited files.
-    const new_config = config.loadConfigDefault(cs.alloc, &source, false) catch |err| {
+    var new_config = config.loadConfigDefault(cs.alloc, &source, false) catch |err| {
         // A TOML parse error already reported per-line warnings; treat it as
         // a hard failure and keep the live config rather than swapping in a
         // partially-merged one. Nothing to deinit here: the load failed before
@@ -87,7 +87,12 @@ pub fn handleConfigReload() !void {
         return err;
     };
     // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
-    const new_ptr = try cs.alloc.create(@TypeOf(new_config));
+    // If the box allocation fails, release the just-loaded config: the defer
+    // below only exists once `new_ptr` owns it.
+    const new_ptr = cs.alloc.create(@TypeOf(new_config)) catch |err| {
+        new_config.deinit(cs.alloc);
+        return err;
+    };
     new_ptr.* = new_config;
     // The defer owns BOTH the Config internals and the box itself, so any
     // pre-swap failure or early return frees the whole allocation. `committed`
