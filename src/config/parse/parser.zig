@@ -17,7 +17,8 @@
 //!   which workspace rules rely on);
 //!   values: decimal integers, `true`/`false`, single- or double-quoted
 //!   strings, bracketed `[a, b, c]` arrays, bare multi-token lists, colors
-//!   (`#RRGGBB`, `0xRRGGBB`), and scalable values with a unit suffix;
+//!   (`#RRGGBB`, `#RRGGBBAA`, `0xRRGGBB`, `0xRRGGBBAA`), and scalable
+//!   values with a unit suffix;
 //!   `#` comments to end of line; duplicate keys accumulate into an array.
 //!
 //! REJECTED, with the error each produces:
@@ -29,7 +30,7 @@
 //!   tokenize as a scalable absolute; the whole-number case stays an int)
 //!   a key or table name the reader cannot lex               -> InvalidSyntax
 //!   a `[header]` that does not open a section the reader accepts -> InvalidSection
-//!   a color token that is not a valid 24-bit hex              -> InvalidColor
+//!   a color token that is not a valid 6/8-digit hex           -> InvalidColor
 //!   allocator exhaustion (distinct so callers can retry)     -> OutOfMemory
 const std = @import("std");
 const log = std.log.scoped(.parser);
@@ -102,7 +103,9 @@ fn hexPrefixLen(value: []const u8) ?u2 {
     return null;
 }
 
-/// Parses a color token into a packed 0xRRGGBB value.
+/// Parses a color token into a packed `0xAARRGGBB` value.
+/// Six hex digits are opaque `RRGGBB`; eight are `RRGGBBAA`, whose trailing
+/// alpha byte is moved to the high byte of the packed result.
 /// Test seam: pure parse core pinned by parser_test.
 pub fn parseColor(value: []const u8) !u32 {
     if (value.len == 0) return error.InvalidColor;
@@ -110,11 +113,13 @@ pub fn parseColor(value: []const u8) !u32 {
     const offset: u8 = hexPrefixLen(value) orelse 0;
     const hex_part = value[offset..];
 
-    if (hex_part.len == 0) return error.InvalidColor;
+    if (hex_part.len != 6 and hex_part.len != 8) return error.InvalidColor;
 
     const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
-    if (color > types.max_color) return error.InvalidColor;
-    return color;
+    if (hex_part.len == 6) return types.opaque_alpha | color;
+
+    const alpha = (color & 0xFF) << 24;
+    return alpha | (color >> 8);
 }
 
 const Parser = struct {

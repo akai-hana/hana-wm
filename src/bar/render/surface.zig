@@ -41,7 +41,8 @@ pub const Surface = struct {
     /// Separate GC used exclusively for the xcb_copy_area blit.
     copy_gc: u32,
     is_argb: bool = false,
-    /// Pre-computed alpha byte for XCB pixel packing.
+    /// Global alpha multiplier for XCB fills (0xFF = no global fade). The
+    /// per-color alpha byte is folded in by `packFill`.
     alpha_u8: u8 = 0xFF,
     last_color: ?u32 = null,
     /// Cached GC foreground: skips xcb_change_gc when unchanged (the common
@@ -163,8 +164,9 @@ pub const Surface = struct {
         self.last_color = color;
     }
 
-    /// Uses XCB rather than Cairo to write straight-alpha pixels (picom
-    /// expects straight-alpha; Cairo's XRender backend writes premultiplied).
+    /// Uses XCB rather than Cairo to write background pixels; `packFill`
+    /// owns the alpha encoding (legacy straight-alpha for six-digit colors,
+    /// premultiplied for explicit per-color alpha).
     ///
     /// ## Paint-order rule: XCB fills are ordered BEFORE every cairo glyph
     /// of the frame
@@ -200,10 +202,7 @@ pub const Surface = struct {
             bindings.cairo_surface_flush(self.cairo_surface);
             self.xcb_filled_this_frame = true;
         }
-        const packed_color: u32 = if (self.is_argb)
-            (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF)
-        else
-            color;
+        const packed_color = packFill(color, self.alpha_u8, self.is_argb);
         if (self.last_gc_color != packed_color) {
             _ = core.xcb.xcb_change_gc(
                 self.conn,
@@ -249,11 +248,51 @@ pub const Surface = struct {
     }
 };
 
+/// Packs a fill color for the XCB GC.
+///
+/// Six-digit colors (opaque alpha byte) keep the PRE-RGBA straight-alpha
+/// encoding: the compositor treats ARGB32 as premultiplied, so their full RGB
+/// is contributed at every global alpha. That is what preserves the old bar
+/// look -- accents stay visible at `transparency = 0%` instead of vanishing,
+/// and the frame clear tints the content behind the bar exactly as it did
+/// before per-color alpha existed.
+///
+/// A color with an explicit alpha byte (`#RRGGBBAA`, alpha < 0xFF) is
+/// premultiplied instead, so `00` is genuinely transparent and partial
+/// alphas blend correctly.
+pub inline fn packFill(color: u32, global_alpha: u8, is_argb: bool) u32 {
+    if (!is_argb) return color & 0x00FF_FFFF;
+    const color_alpha: u8 = @truncate(color >> 24);
+    const alpha = combinedAlpha(global_alpha, color_alpha);
+    if (color_alpha == 0xFF)
+        return (@as(u32, alpha) << 24) | (color & 0x00FF_FFFF);
+    return premultiply(color, alpha);
+}
+
+/// Multiplies two straight-alpha bytes (the global bar alpha and a color's
+/// own alpha), rounded to the nearest 8-bit value.
+pub inline fn combinedAlpha(global: u8, color: u8) u8 {
+    const product: u32 = @as(u32, global) * @as(u32, color);
+    return @intCast((product + 127) / 255);
+}
+
+/// Packs a straight-alpha `0xAARRGGBB` color into XRender's premultiplied
+/// `0xAARRGGBB` pixel: each RGB channel is scaled by `alpha / 255`, rounded.
+/// An opaque color is returned unchanged and a transparent one becomes zero.
+pub inline fn premultiply(color: u32, alpha: u8) u32 {
+    const a: u32 = alpha;
+    const r = (((color >> 16) & 0xFF) * a + 127) / 255;
+    const g = (((color >> 8) & 0xFF) * a + 127) / 255;
+    const b = ((color & 0xFF) * a + 127) / 255;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
 inline fn setCairoColor(ctx: *bindings.cairo_t, color: u32) void {
+    const a = @as(f64, @floatFromInt((color >> 24) & 0xFF)) / 255.0;
     const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
     const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
     const b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0;
-    bindings.cairo_set_source_rgba(ctx, r, g, b, 1.0);
+    bindings.cairo_set_source_rgba(ctx, r, g, b, a);
 }
 
 inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u16, h: u16) u32 {

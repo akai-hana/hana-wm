@@ -63,11 +63,19 @@ exact pixels.
   `transparency` is stricter: bare integers are rejected (warned
   and ignored), so write `0.5` or `50%`; `1.0` or `100%` is
   fully opaque.
-- Colors accept `"#RRGGBB"`, `#RRGGBB`, or `0xRRGGBB`, quoted or not. A bare
+- Colors accept `"#RRGGBB"`, `#RRGGBB`, `0xRRGGBB`, or their 8-digit
+  `RRGGBBAA` forms, quoted or not. The last byte is straight alpha, where
+  `00` is fully transparent and `FF` is opaque — e.g. `bg = "#0d0d1400"`
+  makes the bar background fully transparent under a compositor. A bare
   all-digit spelling is hex too when it has exactly 6 (`RRGGBB`) or 8
   (`RRGGBBAA`) digits — e.g. `112233` reads as `0x112233`; any other bare
   number in a color slot is invalid (never silently coerced to a decimal
-  color).
+  color). Per-color alpha multiplies with the bar-wide `transparency`.
+  Six-digit colors keep the legacy bar-wide fade: `transparency` scales their
+  alpha but leaves their RGB straight, so a six-digit accent still contributes
+  its color even at `transparency = 0%` (the pre-RGBA look). Write an explicit
+  alpha byte (`#RRGGBBAA`) when you need a color to vanish or blend with true
+  compositor transparency.
 - Colors can also be built by **mixing** other colors with `+`, where the
   first operand carries the remaining weight:
   `primary_color +(weight:25%) secondary_color` = 75%/25%; a bare `+` is an

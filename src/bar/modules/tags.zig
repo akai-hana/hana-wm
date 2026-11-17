@@ -177,7 +177,7 @@ fn drawCell(
     const bg = if (is_current) config.selected_bg else config.bg;
     const fg = config.workspaceTextFg(is_current);
 
-    dc.fillRect(x, 0, cell_w, height, bg);
+    dc.paintSegmentBg(config, x, 0, cell_w, height, bg);
 
     // baselineY returns the same value for every cell; hoist it once outside.
     const text_x = x + (cell_w -| label_w) / 2;

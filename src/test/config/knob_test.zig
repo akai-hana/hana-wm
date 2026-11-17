@@ -62,8 +62,8 @@ fn expectAllDefaults(cfg: *const composed.Config) !void {
 test "fragment Configs carry sensible field initializers" {
     const bar_proto: bar_config.Config = .{};
     try testing.expect(bar_proto.enabled);
-    try testing.expectEqual(@as(u32, 0x222222), bar_proto.bg);
-    try testing.expectEqual(@as(u32, 0x61AFEF), bar_proto.primary_color);
+    try testing.expectEqual(@as(u32, 0xFF_222222), bar_proto.bg);
+    try testing.expectEqual(@as(u32, 0xFF_61AFEF), bar_proto.primary_color);
     try testing.expectEqual(bar_config.BarScreenPosition.top, bar_proto.bar_position);
 
     const ws_proto: workspaces_config.Config = .{};
@@ -72,6 +72,58 @@ test "fragment Configs carry sensible field initializers" {
     const tiling_proto: tiling_config.Config = .{};
     try testing.expectEqual(tiling_config.MasterSide.left, tiling_proto.master_side);
     try testing.expectEqual(types.ScalableValue.percentage(50.0), tiling_proto.master_width);
+}
+
+test "background alpha and global transparency both gate the ARGB visual" {
+    var opaque_bg = try loadToml(testing.allocator, "bg-alpha-opaque",
+        \\[bar]
+        \\bg = "#0d0d14"
+        \\
+    );
+    defer opaque_bg.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0xFF_0d0d14), opaque_bg.bar.bg);
+    try testing.expectEqual(@as(u8, 0xFF), opaque_bg.bar.bgAlpha());
+    try testing.expect(!opaque_bg.bar.needsArgb());
+
+    var color_alpha = try loadToml(testing.allocator, "bg-alpha-color",
+        \\[bar]
+        \\bg = "#0d0d1480"
+        \\
+    );
+    defer color_alpha.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0x80_0d0d14), color_alpha.bar.bg);
+    try testing.expectEqual(@as(u8, 0x80), color_alpha.bar.bgAlpha());
+    try testing.expect(color_alpha.bar.needsArgb());
+
+    var global_alpha = try loadToml(testing.allocator, "bg-alpha-global",
+        \\[bar]
+        \\transparency = 50%
+        \\
+    );
+    defer global_alpha.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 0xFF), global_alpha.bar.bgAlpha());
+    try testing.expect(global_alpha.bar.needsArgb());
+
+    // A translucent state fill (selected tag) also needs the ARGB visual,
+    // even while the bar background itself stays opaque.
+    var selected_alpha = try loadToml(testing.allocator, "bg-alpha-selected",
+        \\[bar]
+        \\selected_bg = "#0d0d1480"
+        \\
+    );
+    defer selected_alpha.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0x80_0d0d14), selected_alpha.bar.selected_bg);
+    try testing.expectEqual(@as(u8, 0xFF), selected_alpha.bar.bgAlpha());
+    try testing.expect(selected_alpha.bar.needsArgb());
+
+    // An opaque state fill keeps the 24-bit path.
+    var selected_opaque = try loadToml(testing.allocator, "bg-alpha-selected-opaque",
+        \\[bar]
+        \\selected_bg = "#0d0d14"
+        \\
+    );
+    defer selected_opaque.deinit(testing.allocator);
+    try testing.expect(!selected_opaque.bar.needsArgb());
 }
 
 test "key-less config file loads pure table defaults end-to-end" {
@@ -153,8 +205,8 @@ test "[tiling] gap/border quartet reads" {
     defer flat.deinit(testing.allocator);
     try testing.expectEqual(types.ScalableValue.absolute(7.0), flat.tiling.gap_width);
     try testing.expectEqual(types.ScalableValue.absolute(3.0), flat.tiling.border_width);
-    try testing.expectEqual(@as(u32, 0x112233), flat.tiling.border_focused);
-    try testing.expectEqual(@as(u32, 0x445566), flat.tiling.border_unfocused);
+    try testing.expectEqual(@as(u32, 0xFF_112233), flat.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_445566), flat.tiling.border_unfocused);
 
     // A lone [tiling] (no functional keys at all) still feeds the
     // quartet -- this is exactly the shape akai.toml ships today.
@@ -215,12 +267,12 @@ test "fallback chains: title/run colors follow their siblings" {
         \\
     );
     defer no_colors.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.title_accent_color);
-    try testing.expectEqual(@as(u32, 0x040506), no_colors.bar.title_unfocused_accent);
-    try testing.expectEqual(@as(u32, 0x050607), no_colors.bar.title_minimized_accent);
+    try testing.expectEqual(@as(u32, 0xFF_010203), no_colors.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_040506), no_colors.bar.title_unfocused_accent);
+    try testing.expectEqual(@as(u32, 0xFF_050607), no_colors.bar.title_minimized_accent);
     try testing.expectEqual(@as(?u32, null), no_colors.bar.run_bg);
     try testing.expectEqual(@as(?u32, null), no_colors.bar.run_prompt_color);
-    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.runPromptColor());
+    try testing.expectEqual(@as(u32, 0xFF_010203), no_colors.bar.runPromptColor());
 
     // Regime 2: [bar.properties] present with only `title`. The accent trio now
     // reads per-key (absent keys copy their sibling); the run trio are also
@@ -238,13 +290,13 @@ test "fallback chains: title/run colors follow their siblings" {
         \\
     );
     defer with_title.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.title_accent_color);
-    try testing.expectEqual(@as(u32, 0x040506), with_title.bar.title_unfocused_accent);
-    try testing.expectEqual(@as(u32, 0x050607), with_title.bar.title_minimized_accent);
-    try testing.expectEqual(@as(?u32, 0x0a0b0c), with_title.bar.run_bg);
-    try testing.expectEqual(@as(?u32, 0x070809), with_title.bar.run_fg);
-    try testing.expectEqual(@as(?u32, 0x010203), with_title.bar.run_prompt_color);
-    try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.runBg());
+    try testing.expectEqual(@as(u32, 0xFF_0a0b0c), with_title.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_040506), with_title.bar.title_unfocused_accent);
+    try testing.expectEqual(@as(u32, 0xFF_050607), with_title.bar.title_minimized_accent);
+    try testing.expectEqual(@as(?u32, 0xFF_0a0b0c), with_title.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0xFF_070809), with_title.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0xFF_010203), with_title.bar.run_prompt_color);
+    try testing.expectEqual(@as(u32, 0xFF_0a0b0c), with_title.bar.runBg());
     try testing.expectEqual(@as(?u32, null), with_title.bar.indicator_color);
 }
 
@@ -267,21 +319,21 @@ test "selected workspace tag: per-state composite styling + indicator color" {
         \\
     );
     defer cfg.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0xEEEEEE), cfg.bar.selected_fg);
-    try testing.expectEqual(@as(?u32, 0x00FF00), cfg.bar.selected_indicator_color);
+    try testing.expectEqual(@as(u32, 0xFF_EEEEEE), cfg.bar.selected_fg);
+    try testing.expectEqual(@as(?u32, 0xFF_00FF00), cfg.bar.selected_indicator_color);
     // Composite entry landed in the segment maps, not a scalar knob field.
-    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.segment_fg.get("workspaces_selected").?);
+    try testing.expectEqual(@as(u32, 0xFF_00FF00), cfg.bar.segment_fg.get("workspaces_selected").?);
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.segment_props.get("workspaces_selected").?);
     // The selected tag uses the composite color and bold weight...
-    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceTextFg(true));
+    try testing.expectEqual(@as(u32, 0xFF_00FF00), cfg.bar.workspaceTextFg(true));
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.workspaceIconProps(true));
     // ...while unselected tags keep the bar-wide fg and no style.
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.workspaceTextFg(false));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.workspaceTextFg(false));
     try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.workspaceIconProps(false));
     // The selected tag's glyph uses its own color; unselected tags keep the
     // shared indicator/bar-fg fallback.
-    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceIndicatorColor(true));
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.workspaceIndicatorColor(false));
+    try testing.expectEqual(@as(u32, 0xFF_00FF00), cfg.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.workspaceIndicatorColor(false));
 
     // The base "workspaces" entry styles every tag; "workspaces_selected" is a
     // pure style-only overlay on top of it for the current tag.
@@ -297,8 +349,8 @@ test "selected workspace tag: per-state composite styling + indicator color" {
     );
     defer layered.deinit(testing.allocator);
     // No color in the selected overlay: selected text follows the base entry.
-    try testing.expectEqual(@as(u32, 0xFF0000), layered.bar.workspaceTextFg(true));
-    try testing.expectEqual(@as(u32, 0xFF0000), layered.bar.workspaceTextFg(false));
+    try testing.expectEqual(@as(u32, 0xFF_FF0000), layered.bar.workspaceTextFg(true));
+    try testing.expectEqual(@as(u32, 0xFF_FF0000), layered.bar.workspaceTextFg(false));
     // Flags layer: base italic OR'd with the selected tag's bold.
     try testing.expectEqual(
         bar_config.SegmentProps{ .italic = true, .bold = true },
@@ -318,10 +370,10 @@ test "selected workspace tag: per-state composite styling + indicator color" {
     );
     defer fallback.deinit(testing.allocator);
     try testing.expectEqual(@as(?u32, null), fallback.bar.selected_indicator_color);
-    try testing.expectEqual(@as(u32, 0x123456), fallback.bar.workspaceIndicatorColor(true));
-    try testing.expectEqual(@as(u32, 0x123456), fallback.bar.workspaceIndicatorColor(false));
-    try testing.expectEqual(@as(u32, 0xEEEEEE), fallback.bar.workspaceTextFg(true));
-    try testing.expectEqual(@as(u32, 0x070809), fallback.bar.workspaceTextFg(false));
+    try testing.expectEqual(@as(u32, 0xFF_123456), fallback.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0xFF_123456), fallback.bar.workspaceIndicatorColor(false));
+    try testing.expectEqual(@as(u32, 0xFF_EEEEEE), fallback.bar.workspaceTextFg(true));
+    try testing.expectEqual(@as(u32, 0xFF_070809), fallback.bar.workspaceTextFg(false));
 
     // With no indicator color at all, the current tag follows the same text
     // color chain and the rest follow fg.
@@ -332,8 +384,8 @@ test "selected workspace tag: per-state composite styling + indicator color" {
         \\
     );
     defer fg_fallback.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0xEEEEEE), fg_fallback.bar.workspaceIndicatorColor(true));
-    try testing.expectEqual(@as(u32, 0x070809), fg_fallback.bar.workspaceIndicatorColor(false));
+    try testing.expectEqual(@as(u32, 0xFF_EEEEEE), fg_fallback.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0xFF_070809), fg_fallback.bar.workspaceIndicatorColor(false));
 }
 
 test "palette references resolve by full name cross-section" {
@@ -363,18 +415,18 @@ test "palette references resolve by full name cross-section" {
     defer refs.deinit(testing.allocator);
 
     // tiling borders resolve from the palette.
-    try testing.expectEqual(@as(u32, 0xAA0000), refs.tiling.border_focused);
-    try testing.expectEqual(@as(u32, 0x00BB00), refs.tiling.border_unfocused);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), refs.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_00BB00), refs.tiling.border_unfocused);
     // bar-wide palette knobs resolve their literal colors.
-    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.primary_color);
-    try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.secondary_color);
-    try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.alternative_color);
-    try testing.expectEqual(@as(u32, 0xEEEEEE), refs.bar.text_color);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), refs.bar.primary_color);
+    try testing.expectEqual(@as(u32, 0xFF_00BB00), refs.bar.secondary_color);
+    try testing.expectEqual(@as(u32, 0xFF_0000CC), refs.bar.alternative_color);
+    try testing.expectEqual(@as(u32, 0xFF_EEEEEE), refs.bar.text_color);
     // [bar.properties] and selected_bg inherit through full-name references.
-    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.selected_bg);
-    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.title_accent_color);
-    try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.title_unfocused_accent);
-    try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.title_minimized_accent);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), refs.bar.selected_bg);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), refs.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_00BB00), refs.bar.title_unfocused_accent);
+    try testing.expectEqual(@as(u32, 0xFF_0000CC), refs.bar.title_minimized_accent);
 }
 
 test "palette: same var in two sections takes the alphabetically later section" {
@@ -394,8 +446,8 @@ test "palette: same var in two sections takes the alphabetically later section" 
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u32, 0x00BB00), cfg.tiling.border_focused);
-    try testing.expectEqual(@as(u32, 0x00BB00), cfg.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_00BB00), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_00BB00), cfg.bar.title_accent_color);
 }
 
 test "per-segment text colors: bar.properties keys override segment fg" {
@@ -420,24 +472,24 @@ test "per-segment text colors: bar.properties keys override segment fg" {
     defer cfg.deinit(testing.allocator);
 
     // Systatus readouts read primary; slider controls read alternative.
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("cpu"));
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("ram"));
-    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("volume"));
-    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("brightness"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentFg("ram"));
+    try testing.expectEqual(@as(u32, 0xFF_0000CC), cfg.bar.segmentFg("volume"));
+    try testing.expectEqual(@as(u32, 0xFF_0000CC), cfg.bar.segmentFg("brightness"));
     // A segment without an entry falls back to the bar-wide fg.
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("batt"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentFg("batt"));
     // clock has a style-only entry (no color): its color stays the bar fg.
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("clock"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentFg("clock"));
     // The scalar title knob still lands, untouched by the map.
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.title_accent_color);
     try testing.expectEqual(@as(usize, 4), cfg.bar.segment_fg.count());
     // `<name>_value` keys are per-segment NUMBER colors; a segment without one
     // falls back to its own label color (then the bar-wide fg).
-    try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentValueFg("cpu"));
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("brightness"));
-    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentValueFg("volume"));
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("ram"));
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentValueFg("batt"));
+    try testing.expectEqual(@as(u32, 0xFF_00AA00), cfg.bar.segmentValueFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentValueFg("brightness"));
+    try testing.expectEqual(@as(u32, 0xFF_0000CC), cfg.bar.segmentValueFg("volume"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentValueFg("ram"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentValueFg("batt"));
     try testing.expectEqual(@as(usize, 2), cfg.bar.segment_value_fg.count());
     // Style flags ride the same composite entry: `underline`/`bold`/`italic`
     // booleans, combinable with a color. Style-only segments keep the default
@@ -471,14 +523,14 @@ test "per-segment properties: composite entries decode every spelling" {
     defer cfg.deinit(testing.allocator);
 
     // Color + `name=bool` composite.
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("a"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentFg("a"));
     try testing.expectEqual(bar_config.SegmentProps{ .underline = true }, cfg.bar.segmentProps("a"));
     // Bare-flag shorthand (true by default).
-    try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentFg("b"));
+    try testing.expectEqual(@as(u32, 0xFF_00AA00), cfg.bar.segmentFg("b"));
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.segmentProps("b"));
     try testing.expectEqual(bar_config.SegmentProps{ .italic = true }, cfg.bar.segmentProps("c"));
     // Style-only entry, no color: fg stays default.
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("d"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentFg("d"));
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .italic = true }, cfg.bar.segmentProps("d"));
     // `name=false` clears (a no-op here, so no entry is stored).
     try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("e"));
@@ -488,7 +540,7 @@ test "per-segment properties: composite entries decode every spelling" {
     // An unknown bare token is neither a color nor a flag: warn-and-skip, so
     // the segment stays plain with the default fg.
     try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("h"));
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("h"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentFg("h"));
     // Only non-default flag sets are stored (a, b, c, d, f, g).
     try testing.expectEqual(@as(usize, 6), cfg.bar.segment_props.count());
 }
@@ -503,7 +555,7 @@ test "per-segment colors: no [bar.properties] table leaves map empty" {
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_fg.count());
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_value_fg.count());
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_props.count());
-    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xFF_070809), cfg.bar.segmentFg("cpu"));
     try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("cpu"));
 }
 
@@ -793,18 +845,18 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
 
     // border_focused: 75% primary + 25% secondary
     //   r = (170*75 + 50)/100 = 128 (0x80), g = (136*25 + 50)/100 = 34 (0x22).
-    try testing.expectEqual(@as(u32, 0x802200), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_802200), cfg.tiling.border_focused);
     // border_unfocused: 50/50
     //   r = (170 + 1)/2 = 85 (0x55), g = (136 + 1)/2 = 68 (0x44).
-    try testing.expectEqual(@as(u32, 0x554400), cfg.tiling.border_unfocused);
+    try testing.expectEqual(@as(u32, 0xFF_554400), cfg.tiling.border_unfocused);
     // alternative_color is itself a palette-declared mix (50/50); bar.properties
     // `title` references it through the collected palette.
-    try testing.expectEqual(@as(u32, 0x554400), cfg.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_554400), cfg.bar.title_accent_color);
     // [bar.properties] segment mix: 60% primary + 40% secondary
     //   r = (10200 + 50)/100 = 102 (0x66), g = (5440 + 50)/100 = 54 (0x36).
-    try testing.expectEqual(@as(u32, 0x663600), cfg.bar.segmentFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xFF_663600), cfg.bar.segmentFg("cpu"));
     // A plain palette reference through the same path stays literal.
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("ram"));
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.bar.segmentFg("ram"));
 }
 
 test "color-mix: over-budget and head weights revert to the default" {
@@ -822,8 +874,8 @@ test "color-mix: over-budget and head weights revert to the default" {
         \\
     );
     defer cfg.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0x5294E2), cfg.tiling.border_focused);
-    try testing.expectEqual(@as(u32, 0x383C4A), cfg.tiling.border_unfocused);
+    try testing.expectEqual(@as(u32, 0xFF_5294E2), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_383C4A), cfg.tiling.border_unfocused);
 }
 
 test "color-mix: literal array spelling mixes equally, duplicate palette-name declarations later-win" {
@@ -849,10 +901,10 @@ test "color-mix: literal array spelling mixes equally, duplicate palette-name de
 
     // border_focused: a literal 2-element array = 50/50 bare-list mix.
     //   r = (170 + 1)/2 = 85 (0x55), g = (136 + 1)/2 = 68 (0x44).
-    try testing.expectEqual(@as(u32, 0x554400), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0xFF_554400), cfg.tiling.border_focused);
     // alternative_color declared twice: later-wins (secondary), not a 50/50
     // average of the two palette references.
-    try testing.expectEqual(@as(u32, 0x008800), cfg.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0xFF_008800), cfg.bar.title_accent_color);
 }
 
 test "display.dpi: integer and fractional spellings both widen; absent stays null" {
@@ -910,14 +962,14 @@ test "legacy drun_* keys still parse after the rename to run_*" {
     );
     defer legacy.deinit(testing.allocator);
     try testing.expectEqualStrings("$ ", legacy.bar.run_prompt.?);
-    try testing.expectEqual(@as(?u32, 0x0a0b0c), legacy.bar.run_bg);
-    try testing.expectEqual(@as(?u32, 0x070809), legacy.bar.run_fg);
-    try testing.expectEqual(@as(?u32, 0x010203), legacy.bar.run_prompt_color);
+    try testing.expectEqual(@as(?u32, 0xFF_0a0b0c), legacy.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0xFF_070809), legacy.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0xFF_010203), legacy.bar.run_prompt_color);
     // The read-time fallback chain must see the alias exactly as if the
     // canonical key had been used.
-    try testing.expectEqual(@as(u32, 0x0a0b0c), legacy.bar.runBg());
-    try testing.expectEqual(@as(u32, 0x070809), legacy.bar.runFg());
-    try testing.expectEqual(@as(u32, 0x010203), legacy.bar.runPromptColor());
+    try testing.expectEqual(@as(u32, 0xFF_0a0b0c), legacy.bar.runBg());
+    try testing.expectEqual(@as(u32, 0xFF_070809), legacy.bar.runFg());
+    try testing.expectEqual(@as(u32, 0xFF_010203), legacy.bar.runPromptColor());
 }
 
 test "canonical run_* and legacy drun_* are the same field, not two" {
@@ -939,12 +991,12 @@ test "canonical run_* and legacy drun_* are the same field, not two" {
     );
     defer canonical.deinit(testing.allocator);
     try testing.expectEqualStrings("$ ", canonical.bar.run_prompt.?);
-    try testing.expectEqual(@as(?u32, 0x0a0b0c), canonical.bar.run_bg);
-    try testing.expectEqual(@as(?u32, 0x070809), canonical.bar.run_fg);
-    try testing.expectEqual(@as(?u32, 0x010203), canonical.bar.run_prompt_color);
-    try testing.expectEqual(@as(u32, 0x0a0b0c), canonical.bar.runBg());
-    try testing.expectEqual(@as(u32, 0x070809), canonical.bar.runFg());
-    try testing.expectEqual(@as(u32, 0x010203), canonical.bar.runPromptColor());
+    try testing.expectEqual(@as(?u32, 0xFF_0a0b0c), canonical.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0xFF_070809), canonical.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0xFF_010203), canonical.bar.run_prompt_color);
+    try testing.expectEqual(@as(u32, 0xFF_0a0b0c), canonical.bar.runBg());
+    try testing.expectEqual(@as(u32, 0xFF_070809), canonical.bar.runFg());
+    try testing.expectEqual(@as(u32, 0xFF_010203), canonical.bar.runPromptColor());
 }
 
 // P1-44: `hana --dump-config-schema`.
@@ -1005,7 +1057,7 @@ test "composed knob schema: the --dump-config-schema inventory is complete and v
 
     const bg = schemaRow(rows, "bar.bg") orelse return error.BgMissing;
     try testing.expectEqualStrings("color", bg.object.get("type").?.string);
-    try testing.expectEqualStrings("0x222222", bg.object.get("default").?.string);
+    try testing.expectEqualStrings("0xff222222", bg.object.get("default").?.string);
 
     const font_size = schemaRow(rows, "bar.font_size") orelse return error.FontSizeMissing;
     try testing.expectEqualStrings("scalable", font_size.object.get("type").?.string);

@@ -244,7 +244,8 @@ pub fn naturalWidthFor(idx: usize) u16 {
 /// width must survive the scrub so the drag-end redraw re-renders it in place.
 fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     const height = dc.height;
-    dc.dc.fillRect(x, 0, slot, height, dc.config.bg);
+    // The slot was cleared to the bar background before the draw; only the
+    // progress fill is a distinct paint here.
     // Half the padding so the fill sits one padding inside the slot; at
     // least one pixel or a 1px-tall bar paints nothing.
     const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);

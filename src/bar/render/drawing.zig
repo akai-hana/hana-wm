@@ -113,7 +113,7 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
 /// text. Pango interprets offsets in BYTES and attributes by glyph run, so a
 /// range splitting a multi-byte char degrades (callers pass ASCII numerals).
 fn foregroundAttr(list: *bindings.PangoAttrList, start: usize, len: usize, rgb: u32) void {
-    // hana stores 0xRRGGBB; Pango wants each channel scaled to 0..65535.
+    // hana stores 0xAARRGGBB; Pango wants each RGB channel scaled to 0..65535.
     const scale8to16 = struct {
         fn f(c: u32) u16 {
             return @intCast((c * 0xFFFF) / 0xFF);
@@ -322,7 +322,6 @@ pub const DrawContext = struct {
         height: u16,
         text: []const u8,
         padding: u16,
-        bg: u32,
         fg: u32,
         min_w: ?u16,
         props: bar_config.SegmentProps,
@@ -334,7 +333,6 @@ pub const DrawContext = struct {
         defer run.deinit();
         const text_w = run.measure();
         const width: u16 = (if (min_w) |m| @max(text_w, m) else text_w) + padding * 2;
-        self.fillRect(x, 0, width, height, bg);
         self.paintRun(&run, x + padding, self.baselineY(height), fg);
         return x + width;
     }
@@ -342,6 +340,24 @@ pub const DrawContext = struct {
     /// Facade forwarder; the paint-order rule lives on `Surface.fillRect`.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         self.surface.fillRect(x, y, width, height, color);
+    }
+
+    /// Paints a segment's background only when it differs from the bar-wide
+    /// default. The frame's region clear already painted `config.bg`;
+    /// repainting that same pixel would be redundant. A state color (selected
+    /// tag, focused or minimized title, run prompt) replaces the default in
+    /// place, so every region is painted exactly once either way.
+    pub fn paintSegmentBg(
+        self: *DrawContext,
+        config: *const bar_config.Config,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        bg: u32,
+    ) void {
+        if (bg == config.bg) return;
+        self.fillRect(x, y, width, height, bg);
     }
 
     /// Facade forwarder to `FontBook.measureTextWidth`.
@@ -399,7 +415,6 @@ pub fn drawPaddedSegment(
         height,
         text,
         padding,
-        config.bg,
         config.segmentFg(segment_name),
         if (cover_text) |ct| dc.measureTextWidthStyled(ct, props) else null,
         props,
@@ -429,7 +444,7 @@ pub fn drawPaddedSegmentValue(
     const fg = config.segmentFg(segment_name);
     const value_fg = config.segmentValueFg(segment_name);
     if (range == null)
-        return dc.paintedSegment(x, height, text, padding, config.bg, fg, null, props);
+        return dc.paintedSegment(x, height, text, padding, fg, null, props);
 
     // ONE Pango pass: measure the whole string, then paint once with a
     // foreground attribute over the value's byte range.
@@ -460,7 +475,6 @@ pub fn drawPaddedSegmentValue(
     }
 
     const width: u16 = run.measure() + padding * 2;
-    dc.fillRect(x, 0, width, height, config.bg);
     // No ellipsize: an ellipsized layout would CUT the value range, and the
     // reserved width was measured from the untruncated string.
     dc.paintRun(&run, x + padding, dc.baselineY(height), fg);

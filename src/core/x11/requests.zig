@@ -94,7 +94,9 @@ pub inline fn raiseWindow(conn: Connection, win: u32) void {
 }
 
 pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
-    const ck = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
+    // Config colors are packed 0xAARRGGBB, but client windows use a 24-bit
+    // visual: drop the alpha byte before handing the value to XCB.
+    const ck = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel & 0x00FF_FFFF});
     noteSequence(win, ck.sequence);
 }
 

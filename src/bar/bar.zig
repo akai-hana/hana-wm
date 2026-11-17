@@ -138,7 +138,7 @@ const BarSetup = struct {
 fn createBar(m: Metrics, y_pos: i16) !BarSetup {
     const height = m.height;
     const cs = core.getState();
-    const setup = barwin.createBarWindow(height, y_pos, cs.config.bar.getAlpha16() < 0xFFFF);
+    const setup = barwin.createBarWindow(height, y_pos, cs.config.bar.needsArgb());
     errdefer barwin.destroyBarWindow(cs.conn, setup.win_id, setup.colormap);
     barwin.setWindowProperties(setup.win_id, height);
     const dc = try barwin.createDrawContext(setup, height, m.font_size);
