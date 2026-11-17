@@ -78,7 +78,7 @@ pub const Kind = union(enum) {
     scalable_free,
     /// Optional ScalableValue; absent means "auto", a negative warns back to auto.
     auto_scalable,
-    /// Color accepting #RRGGBB / 0xRRGGBB / integer.
+    /// Color accepting #RRGGBB / #RRGGBBAA / 0xRRGGBB / 0xRRGGBBAA / integer.
     color,
     /// Color defaulting to the CURRENT value of a named sibling field of the
     /// SAME fragment root (e.g. run_bg->bg); `copy_when_absent` also assigns
@@ -715,7 +715,7 @@ fn valueLabels(comptime kind: Kind) []const []const u8 {
 
 /// One default as a JSON token: strings quoted+escaped, null/bool/numbers
 /// bare, enums by tag, ScalableValue in its TOML spelling ("24" / "50%"),
-/// colors as "0xRRGGBB" (the spelling the knob itself accepts).
+/// colors as "0xAARRGGBB" (packed alpha + RGB).
 fn fmtDefault(comptime kind: Kind, comptime T: type, comptime v: T) []const u8 {
     comptime {
         const is_color = switch (kind) {

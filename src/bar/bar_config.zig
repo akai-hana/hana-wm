@@ -124,7 +124,7 @@ pub const Config = struct {
     font_size: types.ScalableValue = types.ScalableValue.percentage(10.0),
     spacing: types.ScalableValue = types.ScalableValue.absolute(12.0),
 
-    // Bar color scheme; all values 0xRRGGBB (see types.Color).
+    // Bar color scheme; values are packed 0xAARRGGBB (see types.Color).
     bg: types.Color = types.default_bar_bg,
     fg: types.Color = types.default_bar_fg,
     selected_bg: types.Color = types.default_bar_selected_bg,
@@ -201,6 +201,8 @@ pub const Config = struct {
 
     layout: std.ArrayList(BarLayout) = .empty,
 
+    /// Global bar alpha multiplier: 1.0 = opaque, 0.0 = fully transparent.
+    /// Combined with any per-color alpha from the `bg`/fill colors.
     transparency: f32 = 1.0,
 
     // NOTE: indicator_focused/unfocused are always independently owned (each set
@@ -313,6 +315,31 @@ pub const Config = struct {
     /// Returns the bar's alpha in 16-bit format (0x0000-0xFFFF).
     pub inline fn getAlpha16(self: *const Config) u16 {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * alpha16_ceiling));
+    }
+
+    /// The background color's own straight-alpha byte.
+    pub inline fn bgAlpha(self: *const Config) u8 {
+        return types.alphaOf(self.bg);
+    }
+
+    /// True when the bar needs a depth-32 visual: either the global
+    /// `transparency` is below opaque, or a color the bar paints as a
+    /// background carries alpha (e.g. `bg = "#RRGGBBAA"`).
+    pub inline fn needsArgb(self: *const Config) bool {
+        if (self.getAlpha16() < 0xFFFF) return true;
+        if (self.bgAlpha() < 0xFF) return true;
+        inline for (.{
+            self.selected_bg,
+            self.title_accent_color,
+            self.title_unfocused_accent,
+            self.title_minimized_accent,
+        }) |fill| {
+            if (types.alphaOf(fill) < 0xFF) return true;
+        }
+        if (self.run_bg) |fill| {
+            if (types.alphaOf(fill) < 0xFF) return true;
+        }
+        return false;
     }
 };
 /// The knob table: every bar scalar knob, exactly once. Targets are relative to

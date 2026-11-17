@@ -44,13 +44,28 @@ pub const ScalableValue = struct {
     }
 };
 
-/// X11 color value packed as 0x00RRGGBB into 32 bits.
-/// The high byte is unused; values match what XCB expects for pixel/color fields.
+/// X11 color value packed as 0xAARRGGBB into 32 bits.
+/// The high byte is straight (non-premultiplied) alpha; the low 24 bits are
+/// RGB in the order XCB expects for pixel/color fields. Six-digit config
+/// spellings decode with an opaque 0xFF alpha, and eight-digit spellings
+/// (`RRGGBBAA`) move their trailing alpha byte into the high byte.
 pub const Color = u32;
 
-/// Ceiling of a valid 24-bit color (0x000000-0xFFFFFF). Shared by the
-/// in-range-integer color checks in the parser's single color decoder.
+/// Fully opaque color with no RGB component; OR it with an 0xRRGGBB value.
+pub const opaque_alpha: u32 = 0xFF_00_00_00;
+
+/// Ceiling of the 24-bit RGB component (0x000000-0xFFFFFF).
 pub const max_color: u32 = 0xFF_FF_FF;
+
+/// The RGB bytes of a packed color, with alpha cleared.
+pub inline fn rgbOf(color: Color) u32 {
+    return color & max_color;
+}
+
+/// The straight-alpha byte of a packed color.
+pub inline fn alphaOf(color: Color) u8 {
+    return @truncate(color >> 24);
+}
 
 /// True when the 1-based workspace number lies inside 1..max (the caller's
 /// workspace count or the `max_workspaces` ceiling). The absolute 1..255
@@ -279,17 +294,17 @@ pub const Rule = struct {
 /// Default colors (kept as shared literals: they seed fragment field
 /// initializers and read-time fallbacks without coupling the fragments to
 /// each other). Default color scheme for the focused/unfocused tiling borders.
-pub const default_focused_border: u32 = 0x5294E2;
-pub const default_unfocused_border: u32 = 0x383C4A;
+pub const default_focused_border: u32 = opaque_alpha | 0x5294E2;
+pub const default_unfocused_border: u32 = opaque_alpha | 0x383C4A;
 
 /// Default accent color; declared once so every referencing field has a single source of truth.
-pub const default_accent: u32 = 0x61AFEF;
+pub const default_accent: u32 = opaque_alpha | 0x61AFEF;
 /// Default bar background/foreground scheme. Kept in one place so the bar's
 /// color defaults read as a palette rather than scattered hex literals.
-pub const default_bar_bg: u32 = 0x222222;
-pub const default_bar_fg: u32 = 0xBBBBBB;
-pub const default_bar_selected_bg: u32 = 0x005577;
-pub const default_bar_selected_fg: u32 = 0xEEEEEE;
+pub const default_bar_bg: u32 = opaque_alpha | 0x222222;
+pub const default_bar_fg: u32 = opaque_alpha | 0xBBBBBB;
+pub const default_bar_selected_bg: u32 = opaque_alpha | 0x005577;
+pub const default_bar_selected_fg: u32 = opaque_alpha | 0xEEEEEE;
 
 /// Type-level defaults for optional string fields in the bar config.
 /// When a field is `null`, the corresponding default is used at read time.

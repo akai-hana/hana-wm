@@ -57,8 +57,13 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
         // dirty flag and skipping performDraw loses the expose entirely --
         // the tick-driven next draw sees no seg bits dirty, skips
         // repainting, and clears the flag. The drag defers its own per-tick
-        // blit, so the expose deserves a full performDraw here.
+        // blit, so the expose deserves a full performDraw here. Then re-blit
+        // the whole window: the server dropped every segment's pixels, and a
+        // dirty-span copy would leave untouched segments blank until their
+        // own next tick (visible when a compositor starts and exposes the
+        // mapped bar).
         render.performDraw();
+        render.blitWindow();
     };
 }
 

@@ -414,7 +414,7 @@ pub fn drawActive(
     const fg = config.runFg();
     const prompt = config.run_prompt orelse types.default_run_prompt;
 
-    dc.fillRect(start_x, 0, width, height, bg);
+    dc.paintSegmentBg(config, start_x, 0, width, height, bg);
 
     const baseline = dc.baselineY(height);
     const text_left_x = start_x + pad;

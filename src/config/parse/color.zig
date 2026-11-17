@@ -31,16 +31,14 @@ pub fn colorFromValue(val: Value) ?u32 {
     if (val.asScalar(u32)) |c| return c;
     if (val.asScalar(i64)) |i| {
         if (i < 0) return null;
-        // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB. Any
-        // other bare integral value in a color context is INVALID (no silent
-        // decimal coerce); spell a value-color via 0xRRGGBB instead. An
-        // 8-digit spelling is rejected, matching parser.parseColor's 24-bit
-        // cap: parsing it raw returned 0xRRGGBBAA, whose alpha byte sits in
-        // the low byte and red shifted into the top byte -- an invalid packed
-        // Color flowing into XCB pixel fields.
+        // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB and 8
+        // digits = #RRGGBBAA. Any other bare integral value in a color
+        // context is INVALID (no silent decimal coerce); spell a value-color
+        // via 0xRRGGBB instead. parseColor owns the RGBA-to-ARGB packing so
+        // the alpha byte never lands in an XCB pixel field by accident.
         var buf: [20]u8 = undefined;
         const digits = std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intCast(i))}) catch return null;
-        if (digits.len == 6) return std.fmt.parseInt(u32, digits, 16) catch null;
+        if (digits.len == 6 or digits.len == 8) return parser.parseColor(digits) catch null;
         return null;
     }
     if (val.asScalar([]const u8)) |s| {
@@ -225,12 +223,14 @@ fn mixColors(parts: []const MixOperand) u32 {
         for (parts, 0..) |_, i| weights[i] = 1;
     }
 
+    var acc_a: u64 = 0;
     var acc_r: u64 = 0;
     var acc_g: u64 = 0;
     var acc_b: u64 = 0;
     var wsum: u64 = 0;
     for (parts, 0..) |p, i| {
         const w = weights[i];
+        acc_a += ((p.color >> 24) & 0xFF) * w;
         acc_r += ((p.color >> 16) & 0xFF) * w;
         acc_g += ((p.color >> 8) & 0xFF) * w;
         acc_b += (p.color & 0xFF) * w;
@@ -239,10 +239,12 @@ fn mixColors(parts: []const MixOperand) u32 {
     if (wsum == 0) return 0;
     // Round-half-up keeps the midpoint of black/white at 128 where the bare
     // division would truncate 127.5 down to 127.
+    const a = (acc_a + wsum / 2) / wsum;
     const r = (acc_r + wsum / 2) / wsum;
     const g = (acc_g + wsum / 2) / wsum;
     const b = (acc_b + wsum / 2) / wsum;
-    return (@as(u32, @intCast(r)) << 16) |
+    return (@as(u32, @intCast(a)) << 24) |
+        (@as(u32, @intCast(r)) << 16) |
         (@as(u32, @intCast(g)) << 8) |
         @as(u32, @intCast(b));
 }
@@ -369,7 +371,7 @@ fn isMixAttempt(val: parser.Value) bool {
 }
 
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
-/// `0xRRGGBB`, an integer, a full-name reference to a collected palette
+/// `#RRGGBBAA`, `0xRRGGBB`, `0xRRGGBBAA`, an integer, a full-name reference to a collected palette
 /// variable (e.g. `border_focused = primary_color`), or a `+` color-mix
 /// expression of any of those (e.g. `primary_color + (weight:75%)
 /// secondary_color`). The value-decoding forms share colorFromValue (the
@@ -394,6 +396,6 @@ pub fn getColorFromValue(
     }
     // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
-    log.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
+    log.warn("Value for '{s}' is not a color (expected '#RRGGBB', '#RRGGBBAA', '0xRRGGBB', '0xRRGGBBAA', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
     return default;
 }

@@ -102,7 +102,6 @@ fn drawInner(
     const window_count = snapshot.entries.len;
     if (window_count == 0) {
         retireScroller(ctx.config);
-        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
     } else if (window_count == 1) {
         drawSingleWindow(ctx, snapshot);
     } else {
@@ -120,7 +119,7 @@ fn drawSingleWindow(
     const workspace_has_focus = snapshot.focused_window != null;
 
     const accent = accentFor(ctx.config, workspace_has_focus, is_minimized, ctx.config.title_unfocused_accent);
-    ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
+    ctx.dc.paintSegmentBg(ctx.config, ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const text_geom = titleTextGeom(ctx, ctx.start_x, ctx.width);
@@ -276,7 +275,7 @@ fn drawSegmentedTitles(
             info.minimized,
             ctx.config.title_unfocused_accent,
         );
-        ctx.dc.fillRect(segment_x, 0, bounds.w, ctx.height, accent);
+        ctx.dc.paintSegmentBg(ctx.config, segment_x, 0, bounds.w, ctx.height, accent);
 
         if (info.title.len == 0 or bounds.w <= min_cell_w) {
             if (is_focused_win) {

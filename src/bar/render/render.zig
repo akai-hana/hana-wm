@@ -400,6 +400,17 @@ pub fn submitDrawBlockingFull() void {
     performDraw();
 }
 
+/// Restores the whole bar window from the off-screen pixmap. An Expose means
+/// the server dropped the on-screen pixels (a compositor starting or an
+/// occlusion change) while the pixmap is still current; a dirty-span blit
+/// alone would leave untouched segments blank until each one's own next tick.
+/// Cheap: no re-layout and no segment draws.
+pub fn blitWindow() void {
+    const s = state.gBar.state orelse return;
+    if (!s.vis.shown) return;
+    s.render.dc.queueBlit(0, s.render.width);
+}
+
 /// Requests the next draw to repaint every segment (full background-clear:
 /// layout facts, module redraw requests, bar re-anchoring).
 pub fn requestFullRedraw() void {

@@ -68,34 +68,37 @@ test "missing key / missing section yield absent, not panic" {
     try testing.expect(doc.sections.getPtr("nope") == null);
 }
 
-test "parseColor accepts forms and rejects out-of-range" {
-    try testing.expectEqual(@as(u32, 0xFFFFFF), try parser.parseColor("0xFFFFFF"));
-    try testing.expectEqual(@as(u32, 0x61AFEF), try parser.parseColor("#61AFEF"));
-    try testing.expectEqual(@as(u32, 0xFF), try parser.parseColor("#0000ff"));
-    try testing.expectEqual(@as(u32, 0x123456), try parser.parseColor("123456"));
-    // 8 hex digits (ARGB / >24-bit) are out of range for this schema.
-    try testing.expectError(error.InvalidColor, parser.parseColor("0xFFFFFFFF"));
+test "parseColor accepts 6/8-digit forms and rejects other lengths" {
+    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), try parser.parseColor("0xFFFFFF"));
+    try testing.expectEqual(@as(u32, 0xFF_61AFEF), try parser.parseColor("#61AFEF"));
+    try testing.expectEqual(@as(u32, 0xFF_0000FF), try parser.parseColor("#0000ff"));
+    try testing.expectEqual(@as(u32, 0xFF_123456), try parser.parseColor("123456"));
+    // 8-digit spellings are RRGGBBAA; the trailing alpha moves to the high byte.
+    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), try parser.parseColor("0xFFFFFFFF"));
+    try testing.expectEqual(@as(u32, 0x80_0000FF), try parser.parseColor("#0000FF80"));
+    try testing.expectEqual(@as(u32, 0x00_0D0D14), try parser.parseColor("0d0d1400"));
+    try testing.expectError(error.InvalidColor, parser.parseColor("0xFFF"));
+    try testing.expectError(error.InvalidColor, parser.parseColor("0xFFFFF"));
+    try testing.expectError(error.InvalidColor, parser.parseColor("0xFFFFFFF"));
     try testing.expectError(error.InvalidColor, parser.parseColor(""));
     try testing.expectError(error.InvalidColor, parser.parseColor("zzz"));
 }
 
-test "colorFromValue: bare all-digit spellings are 6-digit hex, others invalid" {
-    // A bare 6-digit number is #RRGGBB hex. Any other bare integral value in a
-    // color context is rejected instead of silently coerced: 8-digit spellings
-    // are out-of-range >24-bit values that do not fit the packed 0xRRGGBB a
-    // pixel field expects (parser.parseColor rejects them too), and 7-digit
-    // spellings are neither RGB nor RGBA.
-    try testing.expectEqual(@as(u32, 0x112233), color.colorFromValue(.{ .integer = 112233 }).?);
-    try testing.expectEqual(@as(u32, 0x999999), color.colorFromValue(.{ .integer = 999999 }).?);
+test "colorFromValue: bare 6-digit RGB and 8-digit RGBA hex" {
+    // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA. Any other
+    // bare integral value in a color context is rejected instead of silently
+    // coerced to a decimal color.
+    try testing.expectEqual(@as(u32, 0xFF_112233), color.colorFromValue(.{ .integer = 112233 }).?);
+    try testing.expectEqual(@as(u32, 0xFF_999999), color.colorFromValue(.{ .integer = 999999 }).?);
     try testing.expect(color.colorFromValue(.{ .integer = 300 }) == null);
     try testing.expect(color.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits
-    try testing.expect(color.colorFromValue(.{ .integer = 11223344 }) == null); // 8 digits: out of 24-bit range
-    try testing.expect(color.colorFromValue(.{ .integer = 99999999 }) == null); // 8 digits
+    try testing.expectEqual(@as(u32, 0x44_112233), color.colorFromValue(.{ .integer = 11223344 }).?); // 8 digits
+    try testing.expectEqual(@as(u32, 0x99_999999), color.colorFromValue(.{ .integer = 99999999 }).?); // 8 digits
     try testing.expect(color.colorFromValue(.{ .integer = -1 }) == null);
     // The .color and string forms are unchanged.
     try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .color = 0x61AFEF }).?);
-    try testing.expectEqual(@as(u32, 0x112233), color.colorFromValue(.{ .string = "112233" }).?);
-    try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .string = "#61AFEF" }).?);
+    try testing.expectEqual(@as(u32, 0xFF_112233), color.colorFromValue(.{ .string = "112233" }).?);
+    try testing.expectEqual(@as(u32, 0xFF_61AFEF), color.colorFromValue(.{ .string = "#61AFEF" }).?);
 }
 
 test "mergeDocumentsInto: later document wins for scalars" {
@@ -361,10 +364,10 @@ test "collectPalette: aliases and + mixes resolve through a fixpoint" {
         \\text_color        = "#ffffff"
     );
     color.collectPalette(&doc);
-    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("primary_color").?);
-    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("secondary_color").?);
-    try testing.expectEqual(@as(u32, 0x000000), doc.palette.get("alternative_color").?);
-    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("text_color").?);
+    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("primary_color").?);
+    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("secondary_color").?);
+    try testing.expectEqual(@as(u32, 0xFF_000000), doc.palette.get("alternative_color").?);
+    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("text_color").?);
 }
 
 test "collectPalette: a cyclic mix is skipped, not infinite-looped" {

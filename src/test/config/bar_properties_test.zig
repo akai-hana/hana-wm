@@ -66,9 +66,9 @@ test "knob keys are excluded; plain and _value segment keys split correctly" {
     // suffix-stripped "cpu" key on the value map.
     try testing.expectEqual(@as(usize, 1), cfg.segment_fg.count());
     try testing.expect(cfg.segment_fg.get("title") == null);
-    try testing.expectEqual(@as(u32, 0x00FF00), cfg.segment_fg.get("cpu").?);
+    try testing.expectEqual(@as(u32, 0xFF_00FF00), cfg.segment_fg.get("cpu").?);
     try testing.expectEqual(@as(usize, 1), cfg.segment_value_fg.count());
-    try testing.expectEqual(@as(u32, 0x00AA00), cfg.segment_value_fg.get("cpu").?);
+    try testing.expectEqual(@as(u32, 0xFF_00AA00), cfg.segment_value_fg.get("cpu").?);
     try testing.expectEqual(@as(usize, 0), cfg.segment_props.count());
 }
 
@@ -131,7 +131,7 @@ test "palette references resolve after collectPalette" {
     );
 
     try testing.expectEqual(@as(usize, 1), cfg.segment_fg.count());
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.segment_fg.get("cpu").?);
+    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.segment_fg.get("cpu").?);
 }
 
 test "P2-64: size=N pins a segment's absolute text size" {
@@ -162,7 +162,7 @@ test "P2-64: size=N pins a segment's absolute text size" {
         \\cpu = #ff0000 bold size=12
     );
     try testing.expectEqual(@as(usize, 1), cfg2.segment_fg.count());
-    try testing.expectEqual(@as(u32, 0xff0000), cfg2.segmentFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xFF_ff0000), cfg2.segmentFg("cpu"));
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .size = 12 }, cfg2.segment_props.get("cpu").?);
 
     // Out of range (or non-integer) sizes are not recognized tokens: no

@@ -815,7 +815,7 @@ fn wireUnitTests(
                 entry.*.addImport("diagnostics", diag_mod);
             const t = b.addTest(.{
                 .root_module = entry.*,
-                .test_runner = .{ .path = b.path("dev/test_runner.zig"), .mode = .server },
+                .test_runner = .{ .path = b.path("dev/scripts/test_runner.zig"), .mode = .server },
             });
             const run = b.addRunArtifact(t);
             // Each run step is individually named, so
