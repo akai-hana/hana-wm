@@ -69,14 +69,14 @@ test "missing key / missing section yield absent, not panic" {
 }
 
 test "parseColor accepts 6/8-digit forms and rejects other lengths" {
-    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), try parser.parseColor("0xFFFFFF"));
-    try testing.expectEqual(@as(u32, 0xFF_61AFEF), try parser.parseColor("#61AFEF"));
-    try testing.expectEqual(@as(u32, 0xFF_0000FF), try parser.parseColor("#0000ff"));
-    try testing.expectEqual(@as(u32, 0xFF_123456), try parser.parseColor("123456"));
+    try testing.expectEqual(types.argb(0xFF_FFFFFF), try parser.parseColor("0xFFFFFF"));
+    try testing.expectEqual(types.argb(0xFF_61AFEF), try parser.parseColor("#61AFEF"));
+    try testing.expectEqual(types.argb(0xFF_0000FF), try parser.parseColor("#0000ff"));
+    try testing.expectEqual(types.argb(0xFF_123456), try parser.parseColor("123456"));
     // 8-digit spellings are RRGGBBAA; the trailing alpha moves to the high byte.
-    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), try parser.parseColor("0xFFFFFFFF"));
-    try testing.expectEqual(@as(u32, 0x80_0000FF), try parser.parseColor("#0000FF80"));
-    try testing.expectEqual(@as(u32, 0x00_0D0D14), try parser.parseColor("0d0d1400"));
+    try testing.expectEqual(types.Color.rgba(0xFF_FFFFFF), try parser.parseColor("0xFFFFFFFF"));
+    try testing.expectEqual(types.Color.rgba(0x80_0000FF), try parser.parseColor("#0000FF80"));
+    try testing.expectEqual(types.Color.rgba(0x00_0D0D14), try parser.parseColor("0d0d1400"));
     try testing.expectError(error.InvalidColor, parser.parseColor("0xFFF"));
     try testing.expectError(error.InvalidColor, parser.parseColor("0xFFFFF"));
     try testing.expectError(error.InvalidColor, parser.parseColor("0xFFFFFFF"));
@@ -88,17 +88,17 @@ test "colorFromValue: bare 6-digit RGB and 8-digit RGBA hex" {
     // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA. Any other
     // bare integral value in a color context is rejected instead of silently
     // coerced to a decimal color.
-    try testing.expectEqual(@as(u32, 0xFF_112233), color.colorFromValue(.{ .integer = 112233 }).?);
-    try testing.expectEqual(@as(u32, 0xFF_999999), color.colorFromValue(.{ .integer = 999999 }).?);
+    try testing.expectEqual(types.argb(0xFF_112233), color.colorFromValue(.{ .integer = 112233 }).?);
+    try testing.expectEqual(types.argb(0xFF_999999), color.colorFromValue(.{ .integer = 999999 }).?);
     try testing.expect(color.colorFromValue(.{ .integer = 300 }) == null);
     try testing.expect(color.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits
-    try testing.expectEqual(@as(u32, 0x44_112233), color.colorFromValue(.{ .integer = 11223344 }).?); // 8 digits
-    try testing.expectEqual(@as(u32, 0x99_999999), color.colorFromValue(.{ .integer = 99999999 }).?); // 8 digits
+    try testing.expectEqual(types.Color.rgba(0x44_112233), color.colorFromValue(.{ .integer = 11223344 }).?); // 8 digits
+    try testing.expectEqual(types.Color.rgba(0x99_999999), color.colorFromValue(.{ .integer = 99999999 }).?); // 8 digits
     try testing.expect(color.colorFromValue(.{ .integer = -1 }) == null);
     // The .color and string forms are unchanged.
-    try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .color = 0x61AFEF }).?);
-    try testing.expectEqual(@as(u32, 0xFF_112233), color.colorFromValue(.{ .string = "112233" }).?);
-    try testing.expectEqual(@as(u32, 0xFF_61AFEF), color.colorFromValue(.{ .string = "#61AFEF" }).?);
+    try testing.expectEqual(types.argb(0x61AFEF), color.colorFromValue(.{ .color = types.argb(0x61AFEF) }).?);
+    try testing.expectEqual(types.argb(0xFF_112233), color.colorFromValue(.{ .string = "112233" }).?);
+    try testing.expectEqual(types.argb(0xFF_61AFEF), color.colorFromValue(.{ .string = "#61AFEF" }).?);
 }
 
 test "mergeDocumentsInto: later document wins for scalars" {
@@ -275,13 +275,13 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     // pa = (160, 0, 0), pb = (128, 32, 0); every assertion below is exact.
     // (Names deliberately avoid [0-9a-f] so they can't be misread as hex
     // literals by colorFromValue before the palette lookup.)
-    var palette = std.StringHashMap(u32).init(testing.allocator);
+    var palette = std.StringHashMap(types.Color).init(testing.allocator);
     defer palette.deinit();
-    try palette.put("pa", 0xA00000);
-    try palette.put("pb", 0x802000);
+    try palette.put("pa", types.argb(0xA00000));
+    try palette.put("pb", types.argb(0x802000));
 
     // Plain midpoint (unspaced string spelling).
-    try testing.expectEqual(@as(u32, 0x901000), color.resolveColorExpr(.{ .string = "pa+pb" }, &palette).?);
+    try testing.expectEqual(types.argb(0x901000), color.resolveColorExpr(.{ .string = "pa+pb" }, &palette).?);
     // Spaced array spelling with a weight on the second operand: b = 25%.
     var spaced = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 4);
     defer spaced.deinit(testing.allocator);
@@ -289,7 +289,7 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try spaced.append(testing.allocator, .{ .string = "+" });
     try spaced.append(testing.allocator, .{ .string = "(weight:25%)" });
     try spaced.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .array = .{ .list = spaced } }, &palette).?);
+    try testing.expectEqual(types.argb(0x980800), color.resolveColorExpr(.{ .array = .{ .list = spaced } }, &palette).?);
 
     // Combined "+(weight:N%)" token (no space after the plus) is equivalent.
     var compact = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 3);
@@ -297,24 +297,24 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try compact.append(testing.allocator, .{ .string = "pa" });
     try compact.append(testing.allocator, .{ .string = "+(weight:25%)" });
     try compact.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .array = .{ .list = compact } }, &palette).?);
+    try testing.expectEqual(types.argb(0x980800), color.resolveColorExpr(.{ .array = .{ .list = compact } }, &palette).?);
     // Reversed weight: b = 75%.
-    try testing.expectEqual(@as(u32, 0x881800), color.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
+    try testing.expectEqual(types.argb(0x881800), color.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
 
     // A chain: a stays the head, later operands take their annotation
     // (a=50%, b=25%, a=25%).
-    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .string = "pa+(weight:25%)pb+(weight:25%)pa" }, &palette).?);
+    try testing.expectEqual(types.argb(0x980800), color.resolveColorExpr(.{ .string = "pa+(weight:25%)pb+(weight:25%)pa" }, &palette).?);
 
     // Equal weights beyond two operands share evenly (a=160/0/0,
     // b=128/32/0: r=(160+128+128)/3=139, g=(32+32)/3=21).
-    try testing.expectEqual(@as(u32, 0x8B1500), color.resolveColorExpr(.{ .string = "pa+pb+pb" }, &palette).?);
+    try testing.expectEqual(types.argb(0x8B1500), color.resolveColorExpr(.{ .string = "pa+pb+pb" }, &palette).?);
 }
 
 test "color-mix: malformed expressions resolve to null, not garbage" {
-    var palette = std.StringHashMap(u32).init(testing.allocator);
+    var palette = std.StringHashMap(types.Color).init(testing.allocator);
     defer palette.deinit();
-    try palette.put("a", 0xA00000);
-    try palette.put("b", 0x802000);
+    try palette.put("a", types.argb(0xA00000));
+    try palette.put("b", types.argb(0x802000));
 
     // No '+': not a mix (plain aliases live in getColorFromValue).
     try testing.expect(color.resolveColorExpr(.{ .string = "pa" }, &palette) == null);
@@ -335,17 +335,17 @@ test "color-mix: malformed expressions resolve to null, not garbage" {
 }
 
 test "color-mix: a bare operand list mixes equally" {
-    var palette = std.StringHashMap(u32).init(testing.allocator);
+    var palette = std.StringHashMap(types.Color).init(testing.allocator);
     defer palette.deinit();
-    try palette.put("pa", 0xA00000);
-    try palette.put("pb", 0x802000);
+    try palette.put("pa", types.argb(0xA00000));
+    try palette.put("pb", types.argb(0x802000));
 
     // `[pa, pb]` with no operator or weights is a 50/50 equal-weight mix.
     var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 2);
     defer arr.deinit(testing.allocator);
     try arr.appendSlice(testing.allocator, &.{ .{ .string = "pa" }, .{ .string = "pb" } });
     const mixed = color.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(u32, 0x901000), mixed);
+    try testing.expectEqual(types.argb(0x901000), mixed);
     // A single-element list is not a mix; the alias fallback handles it.
     var one = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 1);
     defer one.deinit(testing.allocator);
@@ -364,10 +364,10 @@ test "collectPalette: aliases and + mixes resolve through a fixpoint" {
         \\text_color        = "#ffffff"
     );
     color.collectPalette(&doc);
-    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("primary_color").?);
-    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("secondary_color").?);
-    try testing.expectEqual(@as(u32, 0xFF_000000), doc.palette.get("alternative_color").?);
-    try testing.expectEqual(@as(u32, 0xFF_FFFFFF), doc.palette.get("text_color").?);
+    try testing.expectEqual(types.argb(0xFF_FFFFFF), doc.palette.get("primary_color").?);
+    try testing.expectEqual(types.argb(0xFF_FFFFFF), doc.palette.get("secondary_color").?);
+    try testing.expectEqual(types.argb(0xFF_000000), doc.palette.get("alternative_color").?);
+    try testing.expectEqual(types.argb(0xFF_FFFFFF), doc.palette.get("text_color").?);
 }
 
 test "collectPalette: a cyclic mix is skipped, not infinite-looped" {

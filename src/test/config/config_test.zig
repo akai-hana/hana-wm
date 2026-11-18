@@ -429,8 +429,8 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
     // ...and the theme's quartet lands on the tiling fields.
     try testing.expectEqual(types.ScalableValue.percentage(2.0), cfg.tiling.gap_width);
     try testing.expectEqual(types.ScalableValue.percentage(1.0), cfg.tiling.border_width);
-    try testing.expectEqual(@as(u32, 0xFF_AC3232), cfg.tiling.border_focused);
-    try testing.expectEqual(@as(u32, 0xFF_52263E), cfg.tiling.border_unfocused);
+    try testing.expectEqual(types.argb(0xFF_AC3232), cfg.tiling.border_focused);
+    try testing.expectEqual(types.argb(0xFF_52263E), cfg.tiling.border_unfocused);
 }
 
 // The entry-file rule: a config dir contributes its `config.toml` plus that
@@ -826,7 +826,7 @@ test "the shipped example config loads cleanly through the real pipeline" {
     // went missing rather than only on the overall parse.
     try testing.expectEqual(config.DefaultSource.user, source);
     try testing.expect(cfg.core.keybindings.items.len > 0);
-    try testing.expectEqual(@as(u32, 0xFF_0d0d14), cfg.bar.bg);
+    try testing.expectEqual(types.argb(0xFF_0d0d14), cfg.bar.bg);
     try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
 
     config.deinitGoodSource(alloc);

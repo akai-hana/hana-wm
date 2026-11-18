@@ -46,7 +46,7 @@ pub const Value = union(enum) {
     // array consumers read it as-is. Keeps "genuinely duplicated keys"
     // distinct from "one author wrote a list".
     array: struct { list: std.ArrayList(Value), accumulated: bool = false },
-    color: u32,
+    color: types.Color,
     scalable: types.ScalableValue,
 
     // Scalar reads resolve through the last element ONLY for accumulated
@@ -88,7 +88,7 @@ pub const Value = union(enum) {
                 .string => |s| s,
                 else => null,
             },
-            u32 => switch (scalar) {
+            types.Color => switch (scalar) {
                 .color => |c| c,
                 else => null,
             },
@@ -300,6 +300,7 @@ fn typeLabel(comptime T: type) []const u8 {
         []const u8 => "a string",
         []const Value => "an array",
         types.ScalableValue => "a size or percentage",
+        types.Color => "a color",
         else => "a different type",
     };
 }
@@ -340,7 +341,7 @@ pub const Document = struct {
     /// full knob name (e.g. `border_focused = primary_color`) from any
     /// section. Populated by `collectPalette` once all includes are merged,
     /// so "later declaration wins" matches every other knob.
-    palette: std.StringHashMap(u32),
+    palette: std.StringHashMap(types.Color),
     /// Set when any line in this document was warn-and-skipped, or when a
     /// whole file it represents was skipped during the load's merge.
     /// config.zig turns a had_errors merged document into
@@ -351,7 +352,7 @@ pub const Document = struct {
         var sections = std.StringHashMap(Section).init(allocator);
         sections.ensureTotalCapacity(document_sections_reserve) catch |err|
             log.warn("Best-effort op failed (document section map reserve): {}", .{err});
-        var palette = std.StringHashMap(u32).init(allocator);
+        var palette = std.StringHashMap(types.Color).init(allocator);
         palette.ensureTotalCapacity(palette_var_names.len) catch |err|
             log.warn("Best-effort op failed (document palette reserve): {}", .{err});
         return .{ .sections = sections, .root = .{}, .palette = palette };

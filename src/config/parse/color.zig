@@ -6,7 +6,7 @@
 //!
 //! The value-level color grammar, extracted from parser.zig: it is a
 //! self-contained sub-language. The TOKEN-level spellings stay in parser --
-//! `parseColor` (a hex string to a u32) and the weight markers
+//! `parseColor` (a hex string to a packed Color) and the weight markers
 //! (`parseWeightPrefix`/`isWeightToken`/`weightFromToken`/`splitWeightPrefix`),
 //! which the bare-token interpreter classifies with. This file sits in
 //! `parse/` between parser and schema: it reads parser's `Value` and token
@@ -18,6 +18,7 @@
 const std = @import("std");
 const log = std.log.scoped(.color);
 const parser = @import("parser");
+const types = @import("types");
 
 const Value = parser.Value;
 
@@ -27,8 +28,8 @@ const Value = parser.Value;
 /// number is rejected rather than coerced to a decimal color.
 /// `null` means "not a color"; callers layer their own palette-reference
 /// lookup and warning policy on top (getColorFromValue below).
-pub fn colorFromValue(val: Value) ?u32 {
-    if (val.asScalar(u32)) |c| return c;
+pub fn colorFromValue(val: Value) ?types.Color {
+    if (val.asScalar(types.Color)) |c| return c;
     if (val.asScalar(i64)) |i| {
         if (i < 0) return null;
         // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB and 8
@@ -60,20 +61,20 @@ const mix_percent_total: u32 = 100;
 /// derived from the remaining budget, or an equal share when nothing carries
 /// a weight).
 const MixOperand = struct {
-    color: u32,
+    color: types.Color,
     weight: ?u32 = null,
 };
 
 /// Resolves a single mix operand (a hex string or a palette variable name)
 /// against the collected palette.
-fn resolveMixOperand(operand: []const u8, palette: *const std.StringHashMap(u32)) ?u32 {
+fn resolveMixOperand(operand: []const u8, palette: *const std.StringHashMap(types.Color)) ?types.Color {
     if (parser.parseColor(operand)) |c| return c else |_| {}
     return palette.get(operand);
 }
 
 /// Resolves a single mix operand carried by a Value (a `.color`/integer
 /// literal, or a string palette reference); null when it isn't a color.
-fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(types.Color)) ?types.Color {
     if (colorFromValue(val)) |c| return c;
     if (val.asScalar([]const u8)) |s| return palette.get(s);
     return null;
@@ -81,7 +82,7 @@ fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u
 
 /// Cap-checked store of one resolved mix operand. Returns false when `count`
 /// is already at the operand cap, so every mix branch shares one spill guard.
-fn pushMixOperand(out: *[max_mix_operands]MixOperand, count: *usize, color: u32, weight: ?u32) bool {
+fn pushMixOperand(out: *[max_mix_operands]MixOperand, count: *usize, color: types.Color, weight: ?u32) bool {
     if (count.* == max_mix_operands) return false;
     out[count.*] = .{ .color = color, .weight = weight };
     count.* += 1;
@@ -99,7 +100,7 @@ fn pushMixOperand(out: *[max_mix_operands]MixOperand, count: *usize, color: u32,
 /// valid operand count.
 fn extractMixOperands(
     val: Value,
-    palette: *const std.StringHashMap(u32),
+    palette: *const std.StringHashMap(types.Color),
     out: *[max_mix_operands]MixOperand,
 ) ?usize {
     var count: usize = 0;
@@ -208,7 +209,7 @@ fn scanWeights(parts: []const MixOperand) struct { any_explicit: bool, sum: u64 
 /// take their annotation; with no weights at all every operand shares
 /// equally. Weights must be validated (each 0-100, explicit sum <= 100) by
 /// resolveColorExpr before this is reached.
-fn mixColors(parts: []const MixOperand) u32 {
+fn mixColors(parts: []const MixOperand) types.Color {
     // Callers guarantee at least one operand (extractMixOperands returns null
     // on an empty chain); a single element is that element's color.
     const n = parts.len;
@@ -228,25 +229,31 @@ fn mixColors(parts: []const MixOperand) u32 {
     var acc_g: u64 = 0;
     var acc_b: u64 = 0;
     var wsum: u64 = 0;
+    var explicit_alpha = false;
     for (parts, 0..) |p, i| {
         const w = weights[i];
-        acc_a += ((p.color >> 24) & 0xFF) * w;
-        acc_r += ((p.color >> 16) & 0xFF) * w;
-        acc_g += ((p.color >> 8) & 0xFF) * w;
-        acc_b += (p.color & 0xFF) * w;
+        const argb = p.color.argb;
+        acc_a += ((argb >> 24) & 0xFF) * w;
+        acc_r += ((argb >> 16) & 0xFF) * w;
+        acc_g += ((argb >> 8) & 0xFF) * w;
+        acc_b += (argb & 0xFF) * w;
+        explicit_alpha = explicit_alpha or p.color.explicit_alpha;
         wsum += w;
     }
-    if (wsum == 0) return 0;
+    if (wsum == 0) return .{ .argb = 0 };
     // Round-half-up keeps the midpoint of black/white at 128 where the bare
     // division would truncate 127.5 down to 127.
     const a = (acc_a + wsum / 2) / wsum;
     const r = (acc_r + wsum / 2) / wsum;
     const g = (acc_g + wsum / 2) / wsum;
     const b = (acc_b + wsum / 2) / wsum;
-    return (@as(u32, @intCast(a)) << 24) |
-        (@as(u32, @intCast(r)) << 16) |
-        (@as(u32, @intCast(g)) << 8) |
-        @as(u32, @intCast(b));
+    return .{
+        .argb = (@as(u32, @intCast(a)) << 24) |
+            (@as(u32, @intCast(r)) << 16) |
+            (@as(u32, @intCast(g)) << 8) |
+            @as(u32, @intCast(b)),
+        .explicit_alpha = explicit_alpha,
+    };
 }
 
 /// Resolves a `+` color-mix expression into a single mixed color, null when
@@ -254,7 +261,7 @@ fn mixColors(parts: []const MixOperand) u32 {
 /// policy). Every operand resolves through the collected palette; weights
 /// must each sit in 0-100 and their explicit sum must not exceed 100, so a
 /// `+(weight:N%)` chain always produces a valid, fully-determined mix.
-pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(types.Color)) ?types.Color {
     var operands: [max_mix_operands]MixOperand = undefined;
     const count = extractMixOperands(val, palette, &operands) orelse return null;
     const parts = operands[0..count];
@@ -273,7 +280,7 @@ pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32
 /// resolveColorExpr (bare lists and spaced spellings mix); an accumulated
 /// `.array` (duplicate declarations) is NOT a mix -- it falls through to the
 /// last-declaration scalar so "later declaration wins" like every other knob.
-fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(types.Color)) ?types.Color {
     if (colorFromValue(val)) |c| return c;
     if (val == .array) {
         if (resolveColorExpr(val, palette)) |c| return c;
@@ -380,9 +387,9 @@ fn isMixAttempt(val: parser.Value) bool {
 pub fn getColorFromValue(
     key: []const u8,
     val: parser.Value,
-    default: u32,
-    palette: *const std.StringHashMap(u32),
-) u32 {
+    default: types.Color,
+    palette: *const std.StringHashMap(types.Color),
+) types.Color {
     if (colorFromValue(val)) |c| return c;
     if (resolveColorExpr(val, palette)) |c| return c;
     if (isMixAttempt(val)) {

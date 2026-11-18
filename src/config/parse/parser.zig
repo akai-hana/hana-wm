@@ -103,11 +103,12 @@ fn hexPrefixLen(value: []const u8) ?u2 {
     return null;
 }
 
-/// Parses a color token into a packed `0xAARRGGBB` value.
-/// Six hex digits are opaque `RRGGBB`; eight are `RRGGBBAA`, whose trailing
-/// alpha byte is moved to the high byte of the packed result.
+/// Parses a color token into a packed `Color`.
+/// Six hex digits are opaque `RRGGBB` with `explicit_alpha = false`; eight are
+/// `RRGGBBAA`, whose trailing alpha byte is moved to the high byte and flagged
+/// as explicit so the renderer can tell `#RRGGBB` from `#RRGGBBFF`.
 /// Test seam: pure parse core pinned by parser_test.
-pub fn parseColor(value: []const u8) !u32 {
+pub fn parseColor(value: []const u8) !types.Color {
     if (value.len == 0) return error.InvalidColor;
 
     const offset: u8 = hexPrefixLen(value) orelse 0;
@@ -116,10 +117,10 @@ pub fn parseColor(value: []const u8) !u32 {
     if (hex_part.len != 6 and hex_part.len != 8) return error.InvalidColor;
 
     const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
-    if (hex_part.len == 6) return types.opaque_alpha | color;
+    if (hex_part.len == 6) return .{ .argb = types.opaque_alpha | color };
 
     const alpha = (color & 0xFF) << 24;
-    return alpha | (color >> 8);
+    return .{ .argb = alpha | (color >> 8), .explicit_alpha = true };
 }
 
 const Parser = struct {

@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const types = @import("types");
 
 const core = @import("core");
 const model = @import("model");
@@ -675,13 +676,9 @@ test "premultiplied ARGB packing matches XRender's channel meaning" {
     // 50% #0d0d14 becomes #07070a (rounded), not #800d0d14: the compositor
     // treats the stored RGB as already multiplied by alpha.
     try testing.expectEqual(@as(u32, 0x80_07070A), surface.premultiply(0x80_0D0D14, 0x80));
-    // The global multiplier and the color's own alpha compose before premultiply.
-    try testing.expectEqual(@as(u8, 0x80), surface.combinedAlpha(0xFF, 0x80));
-    try testing.expectEqual(@as(u8, 0x80), surface.combinedAlpha(0x80, 0xFF));
-    try testing.expectEqual(@as(u8, 0x40), surface.combinedAlpha(0x80, 0x80));
     try testing.expectEqual(
         @as(u32, 0x40_030305),
-        surface.premultiply(0x80_0D0D14, surface.combinedAlpha(0x80, 0x80)),
+        surface.premultiply(0x80_0D0D14, 0x40),
     );
     // Per-channel rounding: 255 * 128 / 255 = 128 stays 128 at half alpha.
     try testing.expectEqual(@as(u32, 0x80_808080), surface.premultiply(0xFF_FFFFFF, 0x80));
@@ -695,41 +692,81 @@ test "packFill: six-digit colors keep the legacy straight-alpha bar look" {
     // rather than making the accent disappear.
     try testing.expectEqual(
         @as(u32, 0x00_AC3232),
-        surface.packFill(0xFF_AC3232, 0x00, true),
+        surface.packFill(types.Color.legacy(0xFF_AC3232), 0x00, true, true),
     );
     // Global 50% keeps the straight RGB, preserving the old partial fade.
     try testing.expectEqual(
         @as(u32, 0x80_AC3232),
-        surface.packFill(0xFF_AC3232, 0x80, true),
+        surface.packFill(types.Color.legacy(0xFF_AC3232), 0x80, true, true),
     );
     // Opaque global alpha is identical to the old path.
     try testing.expectEqual(
         @as(u32, 0xFF_AC3232),
-        surface.packFill(0xFF_AC3232, 0xFF, true),
+        surface.packFill(types.Color.legacy(0xFF_AC3232), 0xFF, true, true),
     );
     // A 24-bit bar masks to RGB regardless of the color's alpha byte.
     try testing.expectEqual(
         @as(u32, 0x00_AC3232),
-        surface.packFill(0xFF_AC3232, 0x00, false),
+        surface.packFill(types.Color.legacy(0xFF_AC3232), 0x00, false, false),
     );
 }
 
-test "packFill: explicit color alpha stays premultiplied and can vanish" {
+test "packFill: explicit color alpha owns the fade instead of the bar-wide knob" {
     const surface = @import("surface");
     // Explicit #ac323200 is genuinely transparent (all zero), not an
     // additive tint.
     try testing.expectEqual(
         @as(u32, 0x00_000000),
-        surface.packFill(0x00_AC3232, 0xFF, true),
+        surface.packFill(types.Color.rgba(0x00_AC3232), 0xFF, true, true),
     );
-    // Explicit #ac323280 at global 100% stores premultiplied RGB.
+    // Explicit #ac323280 stores premultiplied RGB.
     try testing.expectEqual(
         @as(u32, 0x80_561919),
-        surface.packFill(0x80_AC3232, 0xFF, true),
+        surface.packFill(types.Color.rgba(0x80_AC3232), 0xFF, true, true),
     );
-    // The global multiplier composes with the explicit alpha.
+    // The bar-wide legacy fade must not multiply an explicit alpha away:
+    // #ac3232fe stays nearly opaque even at `transparency = 0%`.
     try testing.expectEqual(
-        @as(u32, 0x40_2B0D0D),
-        surface.packFill(0x80_AC3232, 0x80, true),
+        @as(u32, 0xFE_AB3232),
+        surface.packFill(types.Color.rgba(0xFE_AC3232), 0x00, true, true),
+    );
+    try testing.expectEqual(
+        @as(u32, 0x80_561919),
+        surface.packFill(types.Color.rgba(0x80_AC3232), 0x00, true, true),
+    );
+}
+
+test "packFill: #RRGGBB and #RRGGBBFF take different paths" {
+    const surface = @import("surface");
+    // Both parse to 0xFF_AC3232, but only the explicit spelling ignores the
+    // bar-wide fade. The legacy six-digit color keeps its straight-alpha look.
+    try testing.expectEqual(
+        @as(u32, 0x00_AC3232),
+        surface.packFill(types.Color.legacy(0xFF_AC3232), 0x00, true, true),
+    );
+    try testing.expectEqual(
+        @as(u32, 0xFF_AC3232),
+        surface.packFill(types.Color.rgba(0xFF_AC3232), 0x00, true, true),
+    );
+}
+
+test "packFill: no compositor falls back to opaque straight RGB" {
+    const surface = @import("surface");
+    // Without a compositor the server ignores the window's alpha and shows
+    // the stored RGB. A near-opaque accent at a zero global alpha must stay
+    // its color instead of premultiplying down to black.
+    try testing.expectEqual(
+        @as(u32, 0xFF_AC3232),
+        surface.packFill(types.Color.rgba(0xFE_AC3232), 0x00, true, false),
+    );
+    try testing.expectEqual(
+        @as(u32, 0xFF_AC3232),
+        surface.packFill(types.Color.rgba(0x80_AC3232), 0x80, true, false),
+    );
+    // Explicitly transparent colors also stay plain RGB, since there is no
+    // alpha channel to blend.
+    try testing.expectEqual(
+        @as(u32, 0xFF_AC3232),
+        surface.packFill(types.Color.rgba(0x00_AC3232), 0xFF, true, false),
     );
 }

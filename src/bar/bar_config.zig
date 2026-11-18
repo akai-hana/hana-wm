@@ -201,8 +201,9 @@ pub const Config = struct {
 
     layout: std.ArrayList(BarLayout) = .empty,
 
-    /// Global bar alpha multiplier: 1.0 = opaque, 0.0 = fully transparent.
-    /// Combined with any per-color alpha from the `bg`/fill colors.
+    /// Global legacy bar alpha multiplier: 1.0 = opaque, 0.0 = fully
+    /// transparent. Applies to six-digit fill colors; a fill with an explicit
+    /// alpha byte (`#RRGGBBAA`) uses that alpha instead.
     transparency: f32 = 1.0,
 
     // NOTE: indicator_focused/unfocused are always independently owned (each set
@@ -639,8 +640,8 @@ fn sizeFromEqualsToken(token: []const u8) ?u16 {
 /// The first color-carrying item of a composite array value.
 fn firstColorInItems(
     items: []const parser.Value,
-    palette: *const std.StringHashMap(u32),
-) ?struct { color: u32, consumed: usize } {
+    palette: *const std.StringHashMap(types.Color),
+) ?struct { color: types.Color, consumed: usize } {
     for (items, 0..) |item, i| {
         if (color.colorFromValue(item)) |c| return .{ .color = c, .consumed = i };
         if (item.asScalar([]const u8)) |s| {
@@ -679,7 +680,7 @@ fn applySegmentEntry(
     seg_key: []const u8,
     is_value: bool,
     raw: parser.Value,
-    palette: *const std.StringHashMap(u32),
+    palette: *const std.StringHashMap(types.Color),
 ) !void {
     if (raw != .array) {
         // Style-only single-token spellings: `<flag>` (true) and `<flag>=<bool>`.

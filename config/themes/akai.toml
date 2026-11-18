@@ -49,7 +49,9 @@ text_color = "#ebd9bc"
 # 100% / 1.0 = fully opaque, 0% / 0 = fully transparent.
 # (Bare integers are not accepted here: write `1.0` or `100%`
 # for fully opaque, `0.0` or `0%` for fully transparent.)
-# With picom's gaussian blur, the bar will show blurred content behind it
+# With picom's gaussian blur, the bar will show blurred content behind it.
+# This fade applies to six-digit fills; an explicit #RRGGBBAA fill uses its
+# own alpha instead (so #RRGGBBFF stays opaque even here).
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
 height = 3.25% #TODO: rename to bar_height

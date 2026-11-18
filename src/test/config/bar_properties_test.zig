@@ -13,6 +13,7 @@ const testing = std.testing;
 
 const color = @import("color");
 const parser = @import("parser");
+const types = @import("types");
 const bar_config = @import("bar_config");
 
 fn load(a: std.mem.Allocator, cfg: *bar_config.Config, src: []const u8) !void {
@@ -27,7 +28,7 @@ test "gates: pre-seeded maps clear when [bar] or [bar.properties] is absent" {
     var cfg: bar_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     // Map keys are owned by the Config and freed by cfg.deinit.
-    try cfg.segment_fg.put(testing.allocator, try testing.allocator.dupe(u8, "x"), 0x111111);
+    try cfg.segment_fg.put(testing.allocator, try testing.allocator.dupe(u8, "x"), types.argb(0x111111));
     try cfg.segment_props.put(testing.allocator, try testing.allocator.dupe(u8, "y"), .{ .bold = true });
     try load(arena.allocator(), &cfg,
         \\[tiling]
@@ -37,7 +38,7 @@ test "gates: pre-seeded maps clear when [bar] or [bar.properties] is absent" {
     try testing.expectEqual(@as(usize, 0), cfg.segment_props.count());
 
     // [bar] present, [bar.properties] absent: same clearing, same empty result.
-    try cfg.segment_fg.put(testing.allocator, try testing.allocator.dupe(u8, "z"), 0x222222);
+    try cfg.segment_fg.put(testing.allocator, try testing.allocator.dupe(u8, "z"), types.argb(0x222222));
     try load(arena.allocator(), &cfg,
         \\[bar]
     );
@@ -66,9 +67,9 @@ test "knob keys are excluded; plain and _value segment keys split correctly" {
     // suffix-stripped "cpu" key on the value map.
     try testing.expectEqual(@as(usize, 1), cfg.segment_fg.count());
     try testing.expect(cfg.segment_fg.get("title") == null);
-    try testing.expectEqual(@as(u32, 0xFF_00FF00), cfg.segment_fg.get("cpu").?);
+    try testing.expectEqual(types.argb(0xFF_00FF00), cfg.segment_fg.get("cpu").?);
     try testing.expectEqual(@as(usize, 1), cfg.segment_value_fg.count());
-    try testing.expectEqual(@as(u32, 0xFF_00AA00), cfg.segment_value_fg.get("cpu").?);
+    try testing.expectEqual(types.argb(0xFF_00AA00), cfg.segment_value_fg.get("cpu").?);
     try testing.expectEqual(@as(usize, 0), cfg.segment_props.count());
 }
 
@@ -77,7 +78,7 @@ test "_value entries are color-only: style spellings fall back to bar fg" {
     defer arena.deinit();
     var cfg: bar_config.Config = .{};
     defer cfg.deinit(testing.allocator);
-    cfg.fg = 0x070809;
+    cfg.fg = types.argb(0x070809);
     try load(arena.allocator(), &cfg,
         \\[bar]
         \\
@@ -90,8 +91,8 @@ test "_value entries are color-only: style spellings fall back to bar fg" {
     // the VALUE map (color-only contract) with the bar-fg fallback, and no
     // style flag is ever recorded for a _value key.
     try testing.expectEqual(@as(usize, 2), cfg.segment_value_fg.count());
-    try testing.expectEqual(@as(u32, 0x070809), cfg.segment_value_fg.get("cpu").?);
-    try testing.expectEqual(@as(u32, 0x070809), cfg.segment_value_fg.get("ram").?);
+    try testing.expectEqual(types.argb(0x070809), cfg.segment_value_fg.get("cpu").?);
+    try testing.expectEqual(types.argb(0x070809), cfg.segment_value_fg.get("ram").?);
     try testing.expectEqual(@as(usize, 0), cfg.segment_props.count());
     try testing.expectEqual(@as(usize, 0), cfg.segment_fg.count());
 }
@@ -101,7 +102,7 @@ test "style-only base entries store props but add no color map entry" {
     defer arena.deinit();
     var cfg: bar_config.Config = .{};
     defer cfg.deinit(testing.allocator);
-    cfg.fg = 0x070809;
+    cfg.fg = types.argb(0x070809);
     try load(arena.allocator(), &cfg,
         \\[bar]
         \\
@@ -114,7 +115,7 @@ test "style-only base entries store props but add no color map entry" {
     try testing.expectEqual(@as(usize, 0), cfg.segment_fg.count());
     try testing.expectEqual(@as(usize, 1), cfg.segment_props.count());
     try testing.expectEqual(bar_config.SegmentProps{ .underline = true }, cfg.segment_props.get("clock").?);
-    try testing.expectEqual(@as(u32, 0x070809), cfg.segmentFg("clock"));
+    try testing.expectEqual(types.argb(0x070809), cfg.segmentFg("clock"));
 }
 
 test "palette references resolve after collectPalette" {
@@ -131,7 +132,7 @@ test "palette references resolve after collectPalette" {
     );
 
     try testing.expectEqual(@as(usize, 1), cfg.segment_fg.count());
-    try testing.expectEqual(@as(u32, 0xFF_AA0000), cfg.segment_fg.get("cpu").?);
+    try testing.expectEqual(types.argb(0xFF_AA0000), cfg.segment_fg.get("cpu").?);
 }
 
 test "P2-64: size=N pins a segment's absolute text size" {
@@ -162,7 +163,7 @@ test "P2-64: size=N pins a segment's absolute text size" {
         \\cpu = #ff0000 bold size=12
     );
     try testing.expectEqual(@as(usize, 1), cfg2.segment_fg.count());
-    try testing.expectEqual(@as(u32, 0xFF_ff0000), cfg2.segmentFg("cpu"));
+    try testing.expectEqual(types.argb(0xFF_ff0000), cfg2.segmentFg("cpu"));
     try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .size = 12 }, cfg2.segment_props.get("cpu").?);
 
     // Out of range (or non-integer) sizes are not recognized tokens: no

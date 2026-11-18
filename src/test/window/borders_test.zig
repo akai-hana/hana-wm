@@ -64,8 +64,8 @@ test "borders.resolveBorderColorWith resolves focused vs unfocused config colors
     defer fx.config.tiling.border_focused = saved_focused;
     defer fx.config.tiling.border_unfocused = saved_unfocused;
 
-    fx.config.tiling.border_focused = 0x111111;
-    fx.config.tiling.border_unfocused = 0x222222;
+    fx.config.tiling.border_focused = types.argb(0x111111);
+    fx.config.tiling.border_unfocused = types.argb(0x222222);
 
     const m = pipeline.mut();
     try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
@@ -99,8 +99,8 @@ test "borders.resolveBorderColorWith is 0 for a screen-covering window" {
     defer fx.config.tiling.border_focused = saved_focused;
     defer fx.config.tiling.border_unfocused = saved_unfocused;
 
-    fx.config.tiling.border_focused = 0x111111;
-    fx.config.tiling.border_unfocused = 0x222222;
+    fx.config.tiling.border_focused = types.argb(0x111111);
+    fx.config.tiling.border_unfocused = types.argb(0x222222);
 
     const m = pipeline.mut();
     try window_state_ops.register(m, 1, model.WSId.fromIndex(0));

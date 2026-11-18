@@ -185,7 +185,7 @@ pub const DrawContext = struct {
     }
 
     /// Colors the context and paints `run` at (x, baseline). Empty run paints nothing.
-    inline fn paintRun(self: *DrawContext, run: *fonts.TextRun, x: u16, y: u16, color: u32) void {
+    inline fn paintRun(self: *DrawContext, run: *fonts.TextRun, x: u16, y: u16, color: types.Color) void {
         const l = run.layout orelse return;
         self.surface.setColor(color);
         showLayoutAtBaseline(self.surface.ctx, l, @floatFromInt(x), y);
@@ -200,7 +200,7 @@ pub const DrawContext = struct {
         y_top: u16,
         text: []const u8,
         size_px: u16,
-        color: u32,
+        color: types.Color,
     ) !void {
         // The one genuinely fallible text path: resolving the size-suffixed
         // description can fail with no base description to copy.
@@ -223,7 +223,7 @@ pub const DrawContext = struct {
     /// Draws `text` with its left edge at `x` and baseline at `y`. Infallible:
     /// a run that cannot be built degrades to an empty run (0, paints nothing).
     /// The one fallible text path is `drawTextSized` (`error.NoFont`).
-    pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) void {
+    pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: types.Color) void {
         self.drawTextImpl(x, y, text, null, color, .{});
     }
 
@@ -237,7 +237,7 @@ pub const DrawContext = struct {
         y: u16,
         x_positions: [2]f64,
         text: []const u8,
-        color: u32,
+        color: types.Color,
     ) void {
         // One run, painted at both positions: the two copies must be the same
         // text in the same state, which one shared run guarantees.
@@ -266,7 +266,7 @@ pub const DrawContext = struct {
         y: u16,
         text: []const u8,
         max_width: u16,
-        color: u32,
+        color: types.Color,
     ) void {
         self.drawTextImpl(x, y, text, max_width, color, .{});
     }
@@ -280,7 +280,7 @@ pub const DrawContext = struct {
         y: u16,
         text: []const u8,
         max_width: ?u16,
-        color: u32,
+        color: types.Color,
         props: bar_config.SegmentProps,
     ) void {
         var run = self.fonts.beginRun(text, props, props.size);
@@ -300,7 +300,7 @@ pub const DrawContext = struct {
         x: u16,
         y: u16,
         text: []const u8,
-        color: u32,
+        color: types.Color,
         props: bar_config.SegmentProps,
     ) void {
         self.drawTextImpl(x, y, text, null, color, props);
@@ -322,7 +322,7 @@ pub const DrawContext = struct {
         height: u16,
         text: []const u8,
         padding: u16,
-        fg: u32,
+        fg: types.Color,
         min_w: ?u16,
         props: bar_config.SegmentProps,
     ) !u16 {
@@ -338,8 +338,19 @@ pub const DrawContext = struct {
     }
 
     /// Facade forwarder; the paint-order rule lives on `Surface.fillRect`.
-    pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
+    pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: types.Color) void {
         self.surface.fillRect(x, y, width, height, color);
+    }
+
+    /// Facade forwarder: true when the compositor presence changed and the
+    /// whole frame must be repainted with the new fill encoding.
+    pub fn refreshCompositor(self: *DrawContext) bool {
+        return self.surface.refreshCompositor();
+    }
+
+    /// Facade forwarder for the dev-only color-formula override.
+    pub fn refreshColorMode(self: *DrawContext) bool {
+        return self.surface.refreshColorMode();
     }
 
     /// Paints a segment's background only when it differs from the bar-wide
@@ -354,9 +365,9 @@ pub const DrawContext = struct {
         y: u16,
         width: u16,
         height: u16,
-        bg: u32,
+        bg: types.Color,
     ) void {
-        if (bg == config.bg) return;
+        if (bg.eql(config.bg)) return;
         self.fillRect(x, y, width, height, bg);
     }
 
@@ -464,11 +475,11 @@ pub fn drawPaddedSegmentValue(
     if (run.layout) |l| {
         if (run.attrs) |a| {
             const r = range.?;
-            foregroundAttr(a, r.start, r.len, value_fg);
+            foregroundAttr(a, r.start, r.len, value_fg.raw());
         } else {
             // Default props built no list; make one so the range has a home.
             const fresh = bindings.pango_attr_list_new() orelse return x;
-            foregroundAttr(fresh, range.?.start, range.?.len, value_fg);
+            foregroundAttr(fresh, range.?.start, range.?.len, value_fg.raw());
             bindings.pango_layout_set_attributes(l, fresh);
             run.attrs = fresh;
         }

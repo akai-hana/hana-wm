@@ -84,8 +84,8 @@ pub const Config = struct {
     // (applyInto's assignStr), this deinit frees the copy.
     label: ?[]const u8 = null,
     // The fallback-chain pair: `banner` falls back to `accent`.
-    accent: types.Color = 0x61AFEF,
-    banner: types.Color = 0x61AFEF,
+    accent: types.Color = types.argb(0x61AFEF),
+    banner: types.Color = types.argb(0x61AFEF),
     // Bespoke scalar: NOT a knob (parsed by hand in parseDetail below) —
     // claimed in validateTable's `bespoke` list or the table would flag it
     // as a dead (never-written) field.

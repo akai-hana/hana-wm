@@ -9,6 +9,7 @@
 const hz = @import("hz");
 
 const bar_config = @import("bar_config");
+const types = @import("types");
 
 const segmod = @import("segment");
 const geom = @import("geom");
@@ -170,7 +171,7 @@ fn drawFittedTitle(
     sg: SegmentGeometry,
     window: u32,
     title: []const u8,
-    text_fg: u32,
+    text_fg: types.Color,
     scroll_enabled: bool,
 ) void {
     const text_w = ctx.dc.measureTextWidth(title);
@@ -224,8 +225,8 @@ inline fn accentFor(
     config: *const bar_config.Config,
     is_focused: bool,
     is_minimized: bool,
-    unfocused_fallback: u32,
-) u32 {
+    unfocused_fallback: types.Color,
+) types.Color {
     return if (is_focused)
         config.title_accent_color
     else if (is_minimized)

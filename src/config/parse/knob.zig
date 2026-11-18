@@ -471,7 +471,7 @@ pub fn applyAll(
     cfg: *CfgT,
     comptime knobs: []const Knob,
 ) !void {
-    const palette: *const std.StringHashMap(u32) = &doc.palette;
+    const palette: *const std.StringHashMap(types.Color) = &doc.palette;
     inline for (knobs) |k| knob: {
         if (comptime k.requires.len > 0) {
             if (doc.getSection(k.requires) == null) break :knob;
@@ -737,6 +737,8 @@ fn fmtDefault(comptime kind: Kind, comptime T: type, comptime v: T) []const u8 {
                     std.fmt.comptimePrint("{d}%", .{v.value})
                 else
                     std.fmt.comptimePrint("{d}", .{v.value}))
+            else if (T == types.Color)
+                jsonString(std.fmt.comptimePrint("0x{x:0>8}", .{v.raw()}))
             else
                 @compileError("knob schema: unsupported default type " ++ @typeName(T)),
             else => @compileError("knob schema: unsupported default type " ++ @typeName(T)),
