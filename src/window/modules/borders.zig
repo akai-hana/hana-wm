@@ -57,7 +57,7 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
     // The model is the focus source, so this cannot drift from the
     // pipeline's own pick.
-    return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
+    return focus.focusedBorderColor(m, win, cfg.border_focused.raw(), cfg.border_unfocused.raw());
 }
 
 /// The reconcile delta's border-color pick (the `colorOf` contract hook).
@@ -69,7 +69,7 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
 fn colorOf(win: model.WindowId, m: *const model.Model) u32 {
     if (comptime !build_options.has_tiling) return 0;
     const cfg = &core.getState().config.tiling;
-    return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
+    return focus.focusedBorderColor(m, win, cfg.border_focused.raw(), cfg.border_unfocused.raw());
 }
 
 /// Applies the configured border width to `win`, skipping the configure when

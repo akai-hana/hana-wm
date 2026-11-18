@@ -44,12 +44,43 @@ pub const ScalableValue = struct {
     }
 };
 
-/// X11 color value packed as 0xAARRGGBB into 32 bits.
-/// The high byte is straight (non-premultiplied) alpha; the low 24 bits are
-/// RGB in the order XCB expects for pixel/color fields. Six-digit config
-/// spellings decode with an opaque 0xFF alpha, and eight-digit spellings
-/// (`RRGGBBAA`) move their trailing alpha byte into the high byte.
-pub const Color = u32;
+/// A color parsed from config: the packed pixel plus whether the spelling
+/// carried an explicit alpha byte (`#RRGGBBAA`). Six-digit spellings decode
+/// with an opaque 0xFF alpha but keep `explicit_alpha = false`, so the bar can
+/// tell a legacy six-digit color (which obeys the bar-wide fade) from an
+/// explicit opaque one (`#RRGGBBFF`, which owns its transparency).
+pub const Color = struct {
+    /// Packed 0xAARRGGBB (straight alpha; see `packFill` for pixel packing).
+    argb: u32,
+    /// True when the author wrote the trailing alpha byte explicitly.
+    explicit_alpha: bool = false,
+
+    /// A six-digit / opaque default: keeps the legacy bar-wide fade.
+    pub inline fn legacy(value: u32) Color {
+        return .{ .argb = value };
+    }
+
+    /// An explicit `#RRGGBBAA` color; its alpha is authoritative.
+    pub inline fn rgba(value: u32) Color {
+        return .{ .argb = value, .explicit_alpha = true };
+    }
+
+    /// The raw 32-bit pixel for X11/Cairo boundaries.
+    pub inline fn raw(self: Color) u32 {
+        return self.argb;
+    }
+
+    /// Same packed value and same alpha provenance (so a legacy six-digit
+    /// fill is not treated as identical to an explicit `#RRGGBBFF` one).
+    pub inline fn eql(self: Color, other: Color) bool {
+        return self.argb == other.argb and self.explicit_alpha == other.explicit_alpha;
+    }
+};
+
+/// Convenience for a legacy/opaque color literal (tests and defaults).
+pub inline fn argb(value: u32) Color {
+    return .{ .argb = value };
+}
 
 /// Fully opaque color with no RGB component; OR it with an 0xRRGGBB value.
 pub const opaque_alpha: u32 = 0xFF_00_00_00;
@@ -59,12 +90,12 @@ pub const max_color: u32 = 0xFF_FF_FF;
 
 /// The RGB bytes of a packed color, with alpha cleared.
 pub inline fn rgbOf(color: Color) u32 {
-    return color & max_color;
+    return color.argb & max_color;
 }
 
 /// The straight-alpha byte of a packed color.
 pub inline fn alphaOf(color: Color) u8 {
-    return @truncate(color >> 24);
+    return @truncate(color.argb >> 24);
 }
 
 /// True when the 1-based workspace number lies inside 1..max (the caller's
@@ -294,17 +325,17 @@ pub const Rule = struct {
 /// Default colors (kept as shared literals: they seed fragment field
 /// initializers and read-time fallbacks without coupling the fragments to
 /// each other). Default color scheme for the focused/unfocused tiling borders.
-pub const default_focused_border: u32 = opaque_alpha | 0x5294E2;
-pub const default_unfocused_border: u32 = opaque_alpha | 0x383C4A;
+pub const default_focused_border: Color = .{ .argb = opaque_alpha | 0x5294E2 };
+pub const default_unfocused_border: Color = .{ .argb = opaque_alpha | 0x383C4A };
 
 /// Default accent color; declared once so every referencing field has a single source of truth.
-pub const default_accent: u32 = opaque_alpha | 0x61AFEF;
+pub const default_accent: Color = .{ .argb = opaque_alpha | 0x61AFEF };
 /// Default bar background/foreground scheme. Kept in one place so the bar's
 /// color defaults read as a palette rather than scattered hex literals.
-pub const default_bar_bg: u32 = opaque_alpha | 0x222222;
-pub const default_bar_fg: u32 = opaque_alpha | 0xBBBBBB;
-pub const default_bar_selected_bg: u32 = opaque_alpha | 0x005577;
-pub const default_bar_selected_fg: u32 = opaque_alpha | 0xEEEEEE;
+pub const default_bar_bg: Color = .{ .argb = opaque_alpha | 0x222222 };
+pub const default_bar_fg: Color = .{ .argb = opaque_alpha | 0xBBBBBB };
+pub const default_bar_selected_bg: Color = .{ .argb = opaque_alpha | 0x005577 };
+pub const default_bar_selected_fg: Color = .{ .argb = opaque_alpha | 0xEEEEEE };
 
 /// Type-level defaults for optional string fields in the bar config.
 /// When a field is `null`, the corresponding default is used at read time.

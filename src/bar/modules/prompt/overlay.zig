@@ -131,7 +131,7 @@ inline fn drawScrollSpan(
     baseline: u16,
     text: []const u8,
     text_w: ?u16,
-    color: u32,
+    color: types.Color,
 ) !void {
     if (post) {
         if (text.len == 0 or px.* >= @as(i32, scroll_end_x)) return;
@@ -173,8 +173,8 @@ const CursorStyle = struct {
     scroll_end_x: u16,
     baseline: u16,
     height: u16,
-    accent: u32,
-    bg: u32,
+    accent: types.Color,
+    bg: types.Color,
 };
 
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
@@ -297,10 +297,10 @@ fn drawPill(
     text_left_x: u16,
     text_end_x: u16,
     vim_state: *const editor.EditorState,
-    accent: u32,
+    accent: types.Color,
 ) ?u16 {
     const pill_h_pad: u16 = 6;
-    const white: u32 = 0xFFFFFFFF;
+    const white = types.Color.rgba(0xFFFFFFFF);
 
     // The pill describes the mode the handler is actually in. Gating it
     // on the config key suppressed it for exactly the addons that installed
@@ -352,7 +352,7 @@ fn drawInsertMode(
     scroll_end_x: u16,
     px: *i32,
     vim_state: *const editor.EditorState,
-    accent: u32,
+    accent: types.Color,
 ) !void {
     // Caret geometry was pre-computed in ensureCaretGeom.
     const caret_top = g.cached_caret_top.?;
@@ -377,8 +377,8 @@ fn drawNormalMode(
     scroll_end_x: u16,
     px: *i32,
     vim_state: *const editor.EditorState,
-    accent: u32,
-    bg: u32,
+    accent: types.Color,
+    bg: types.Color,
 ) !void {
     const cur_hi = @min(vim_state.cursor + @intFromBool(vim_state.mode != .insert), vim_state.len);
 

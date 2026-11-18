@@ -62,6 +62,12 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
         // dirty-span copy would leave untouched segments blank until their
         // own next tick (visible when a compositor starts and exposes the
         // mapped bar).
+        // A compositor starting or stopping also changes how fills are
+        // encoded (alpha is blended only while one owns the selection), so a
+        // full repaint is required when that changed -- not just a re-blit.
+        var needs_full = s.render.dc.refreshCompositor();
+        if (s.render.dc.refreshColorMode()) needs_full = true;
+        if (needs_full) render.requestFullRedraw();
         render.performDraw();
         render.blitWindow();
     };

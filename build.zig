@@ -234,6 +234,7 @@ pub fn build(b: *std.Build) !void {
     const root_mod = try wireRootModule(b, target, optimize, has_usr, shared_ctx, &discovery);
     const unit_test_step = try wireUnitTests(b, &discovery, features, test_filter);
     buildExeAndRunStep(b, root_mod);
+    wireColorDemoStep(b, &discovery, has_usr, target, optimize, shared_ctx);
     wireBenchStep(b, bench_enabled, unit_test_step);
     try wireCheckSteps(b, root_mod, &discovery, features, shared_ctx, has_usr, target, optimize);
 
@@ -835,6 +836,35 @@ fn wireUnitTests(
         }
     }
     return unit_test_step;
+}
+
+/// The live color-lab helper. A dev tool, not part of the installed binary:
+/// `zig build color-demo` builds and runs it against the current $DISPLAY.
+fn wireColorDemoStep(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+    has_usr: UsrDirs,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    shared_ctx: SharedBuildContext,
+) void {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("dev/tools/color_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    finalizeModuleLinked(mod, optimize, has_usr);
+    injectShared(mod, shared_ctx);
+    var it = discovery.modules.iterator();
+    while (it.next()) |entry| mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    SystemLibraries.link(mod);
+
+    const exe = b.addExecutable(.{ .name = "hana-color-demo", .root_module = mod });
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| run.addArgs(args);
+    const step = b.step("color-demo", "Run the live color-compositing comparison window");
+    step.dependOn(&run.step);
 }
 
 /// The hana executable + the `run` step.

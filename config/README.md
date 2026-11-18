@@ -70,12 +70,15 @@ exact pixels.
   all-digit spelling is hex too when it has exactly 6 (`RRGGBB`) or 8
   (`RRGGBBAA`) digits — e.g. `112233` reads as `0x112233`; any other bare
   number in a color slot is invalid (never silently coerced to a decimal
-  color). Per-color alpha multiplies with the bar-wide `transparency`.
+  color). An explicit per-color alpha owns that color's transparency: it is
+  used directly and is not multiplied by the bar-wide `transparency`.
   Six-digit colors keep the legacy bar-wide fade: `transparency` scales their
   alpha but leaves their RGB straight, so a six-digit accent still contributes
   its color even at `transparency = 0%` (the pre-RGBA look). Write an explicit
   alpha byte (`#RRGGBBAA`) when you need a color to vanish or blend with true
-  compositor transparency.
+  compositor transparency, independent of the bar-wide fade. The spellings
+  differ even when the alpha is `FF`: `#RRGGBBFF` is explicit and opaque,
+  while `#RRGGBB` still follows the legacy bar-wide fade.
 - Colors can also be built by **mixing** other colors with `+`, where the
   first operand carries the remaining weight:
   `primary_color +(weight:25%) secondary_color` = 75%/25%; a bare `+` is an
