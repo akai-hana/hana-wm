@@ -54,11 +54,21 @@ pub const ColorMode = enum {
     native,
     normal,
     legacy,
-    tint25,
-    tint50,
-    tint75,
-    gamma50,
-    gamma75,
+    /// Source contribution is premultiplied in linear light, then encoded
+    /// back to sRGB before the compositor blends it.
+    linear,
+    /// Screen-like alpha response: k = 1 - (1 - A)^2.
+    screen,
+    /// Hermite smoothstep alpha response: k = A^2 * (3 - 2A).
+    smoothstep,
+    /// Sinusoidal ease-out alpha response: k = sin(pi * A / 2).
+    sine,
+    /// Contribution floor: k = max(A, 0.25), so color survives low alpha.
+    floor25,
+    /// Additive contribution: k = min(1, A + 0.25), saturating early.
+    boost25,
+    /// Quantized alpha response: k = round(4A) / 4.
+    posterize4,
 
     fn fromFile() ColorMode {
         const io = std.Options.debug_io;
@@ -367,24 +377,73 @@ pub inline fn packFillMode(
             (@as(u32, global_alpha) << 24) | rgb,
         .normal => premultiply(0xFF00_0000 | rgb, alpha),
         .legacy => (@as(u32, alpha) << 24) | rgb,
-        .tint25 => tintPixel(rgb, alpha, 0.25),
-        .tint50 => tintPixel(rgb, alpha, 0.50),
-        .tint75 => tintPixel(rgb, alpha, 0.75),
-        .gamma50 => gammaPixel(rgb, alpha, 0.5),
-        .gamma75 => gammaPixel(rgb, alpha, 0.75),
+        .linear => linearPixel(rgb, alpha),
+        .screen => curvePixel(rgb, alpha, screenCurve(alpha)),
+        .smoothstep => curvePixel(rgb, alpha, smoothstepCurve(alpha)),
+        .sine => curvePixel(rgb, alpha, sineCurve(alpha)),
+        .floor25 => curvePixel(rgb, alpha, floorCurve(alpha, 0.25)),
+        .boost25 => curvePixel(rgb, alpha, boostCurve(alpha, 0.25)),
+        .posterize4 => curvePixel(rgb, alpha, posterizeCurve(alpha, 4)),
     };
 }
 
-fn tintPixel(rgb: u32, alpha: u8, t: f64) u32 {
-    const a = @as(f64, @floatFromInt(alpha)) / 255.0;
-    const k = a + t * (1.0 - a);
+inline fn alphaFraction(alpha: u8) f64 {
+    return @as(f64, @floatFromInt(alpha)) / 255.0;
+}
+
+fn curvePixel(rgb: u32, alpha: u8, k: f64) u32 {
     return (@as(u32, alpha) << 24) | scaleRgb(rgb, k);
 }
 
-fn gammaPixel(rgb: u32, alpha: u8, gamma: f64) u32 {
-    const a = @as(f64, @floatFromInt(alpha)) / 255.0;
-    const k = std.math.pow(f64, a, gamma);
-    return (@as(u32, alpha) << 24) | scaleRgb(rgb, k);
+fn screenCurve(alpha: u8) f64 {
+    const inv = 1.0 - alphaFraction(alpha);
+    return 1.0 - inv * inv;
+}
+
+fn smoothstepCurve(alpha: u8) f64 {
+    const a = alphaFraction(alpha);
+    return a * a * (3.0 - 2.0 * a);
+}
+
+fn sineCurve(alpha: u8) f64 {
+    return @sin(alphaFraction(alpha) * std.math.pi / 2.0);
+}
+
+fn floorCurve(alpha: u8, floor: f64) f64 {
+    return @max(alphaFraction(alpha), floor);
+}
+
+fn boostCurve(alpha: u8, boost: f64) f64 {
+    return @min(1.0, alphaFraction(alpha) + boost);
+}
+
+fn posterizeCurve(alpha: u8, steps: f64) f64 {
+    return @round(alphaFraction(alpha) * steps) / steps;
+}
+
+/// Premultiplies in linear light, then encodes back into the sRGB values the
+/// compositor treats as premultiplied source. This keeps the source's hue but
+/// changes how quickly it ramps in at low alpha.
+fn linearPixel(rgb: u32, alpha: u8) u32 {
+    const a = alphaFraction(alpha);
+    const r = linearChannel((rgb >> 16) & 0xFF, a);
+    const g = linearChannel((rgb >> 8) & 0xFF, a);
+    const b = linearChannel(rgb & 0xFF, a);
+    return (@as(u32, alpha) << 24) | (r << 16) | (g << 8) | b;
+}
+
+fn linearChannel(v: u32, alpha: f64) u32 {
+    const c = @as(f64, @floatFromInt(v)) / 255.0;
+    const encoded = srgbFromLinear(srgbToLinear(c) * alpha);
+    return @intFromFloat(@round(std.math.clamp(encoded, 0.0, 1.0) * 255.0));
+}
+
+fn srgbToLinear(c: f64) f64 {
+    return if (c <= 0.04045) c / 12.92 else std.math.pow(f64, (c + 0.055) / 1.055, 2.4);
+}
+
+fn srgbFromLinear(c: f64) f64 {
+    return if (c <= 0.0031308) c * 12.92 else 1.055 * std.math.pow(f64, c, 1.0 / 2.4) - 0.055;
 }
 
 fn scaleRgb(rgb: u32, factor: f64) u32 {

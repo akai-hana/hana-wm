@@ -770,3 +770,44 @@ test "packFill: no compositor falls back to opaque straight RGB" {
         surface.packFill(types.Color.rgba(0x00_AC3232), 0xFF, true, false),
     );
 }
+
+test "packFillMode: dev families keep the alpha and take distinct curves" {
+    const surface = @import("surface");
+    const modes = [_]surface.ColorMode{
+        .normal, .legacy, .linear, .screen, .smoothstep, .sine, .floor25, .boost25, .posterize4,
+    };
+    const pack = struct {
+        fn f(mode: surface.ColorMode, alpha: u8) u32 {
+            return surface.packFillMode(types.Color.legacy(0xFF_AC3232), alpha, true, true, mode);
+        }
+    }.f;
+
+    // At full alpha every family converges on the opaque source color.
+    for (modes) |mode| try testing.expectEqual(@as(u32, 0xFF_AC3232), pack(mode, 0xFF));
+
+    // At zero alpha the source contribution curves start at zero; legacy is
+    // the constant-color endpoint and the floor/boost families deliberately
+    // keep a nonzero contribution so the accent survives the fade.
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.normal, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_AC3232), pack(.legacy, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.linear, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.screen, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.smoothstep, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.sine, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_2B0D0D), pack(.floor25, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_2B0D0D), pack(.boost25, 0x00));
+    try testing.expectEqual(@as(u32, 0x00_000000), pack(.posterize4, 0x00));
+
+    // A midpoint pins each family's response curve: normal A*C, legacy C,
+    // linear source, screen/smoothstep/sine ease-in, floor/boost above
+    // normal, and posterized alpha quantized to 4 steps.
+    try testing.expectEqual(@as(u32, 0x80_561919), pack(.normal, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_AC3232), pack(.legacy, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_7E2222), pack(.linear, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_812626), pack(.screen, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_571919), pack(.smoothstep, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_7A2323), pack(.sine, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_561919), pack(.floor25, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_812626), pack(.boost25, 0x80));
+    try testing.expectEqual(@as(u32, 0x80_561919), pack(.posterize4, 0x80));
+}

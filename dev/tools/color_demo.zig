@@ -25,10 +25,7 @@ var base_names = [_][]const u8{ "#AC3232", "#3298AC" };
 const alphas = [_]u8{ 0, 32, 64, 128, 192, 255 };
 
 const Mode = union(enum) {
-    normal,
-    legacy,
-    tint: f64,
-    gamma: f64,
+    color: surface.ColorMode,
     solid,
 };
 
@@ -40,14 +37,16 @@ const Row = struct {
 };
 
 const rows = [_]Row{
-    .{ .label = "normal    S = A*C", .mode = .normal, .id = "normal" },
-    .{ .label = "legacy    S = C", .mode = .legacy, .id = "legacy" },
-    .{ .label = "tint .25  k = A+.25(1-A)", .mode = .{ .tint = 0.25 }, .id = "tint25" },
-    .{ .label = "tint .50  k = A+.50(1-A)", .mode = .{ .tint = 0.50 }, .id = "tint50" },
-    .{ .label = "tint .75  k = A+.75(1-A)", .mode = .{ .tint = 0.75 }, .id = "tint75" },
-    .{ .label = "gamma .5  k = A^.5", .mode = .{ .gamma = 0.5 }, .id = "gamma50" },
-    .{ .label = "gamma .75 k = A^.75", .mode = .{ .gamma = 0.75 }, .id = "gamma75" },
-    .{ .label = "opaque    A=255, S=C (reference)", .mode = .solid, .id = "" },
+    .{ .label = "normal     S = A*C", .mode = .{ .color = .normal }, .id = "normal" },
+    .{ .label = "legacy     S = C", .mode = .{ .color = .legacy }, .id = "legacy" },
+    .{ .label = "linear     S = encode(A*decode(C))", .mode = .{ .color = .linear }, .id = "linear" },
+    .{ .label = "screen     k = 1-(1-A)^2", .mode = .{ .color = .screen }, .id = "screen" },
+    .{ .label = "smoothstep k = A^2(3-2A)", .mode = .{ .color = .smoothstep }, .id = "smoothstep" },
+    .{ .label = "sine       k = sin(pi*A/2)", .mode = .{ .color = .sine }, .id = "sine" },
+    .{ .label = "floor .25  k = max(A,.25)", .mode = .{ .color = .floor25 }, .id = "floor25" },
+    .{ .label = "boost .25  k = min(1,A+.25)", .mode = .{ .color = .boost25 }, .id = "boost25" },
+    .{ .label = "posterize  k = round(4A)/4", .mode = .{ .color = .posterize4 }, .id = "posterize4" },
+    .{ .label = "opaque     A=255, S=C (reference)", .mode = .solid, .id = "" },
 };
 
 const Layout = struct {
@@ -234,8 +233,10 @@ fn parseHexColor(text: []const u8) ?u32 {
 
 fn makeLayout(screen: *xcb.xcb_screen_t) Layout {
     const margin: u16 = 14;
+    const row_h: u16 = 49;
+    const rows_y: u16 = 112;
     const want_w: u32 = 1480;
-    const want_h: u32 = 520;
+    const want_h: u32 = @as(u32, rows_y) + @as(u32, rows.len) * row_h + 14;
     const width: u16 = @intCast(@min(want_w, @as(u32, screen.width_in_pixels) - 32));
     const height: u16 = @intCast(@min(want_h, @as(u32, screen.height_in_pixels) - 48));
     const label_w: u16 = @intCast(@min(@as(u32, 310), @as(u32, width) / 3));
@@ -244,9 +245,7 @@ fn makeLayout(screen: *xcb.xcb_screen_t) Layout {
     const groups: u32 = base_colors.len;
     const horizontal: u32 = @as(u32, width) - 2 * margin - label_w - group_gap * (groups - 1);
     const swatch_w: u16 = @intCast(@max(@as(u32, 40), horizontal / (cols * groups)));
-    const row_h: u16 = 49;
     const swatch_h: u16 = 34;
-    const rows_y: u16 = 112;
     return .{
         .width = width,
         .height = height,
@@ -380,36 +379,9 @@ fn paint(dc: *drawing.DrawContext, layout: Layout, selected: []const u8) void {
 
 fn formulaPixel(mode: Mode, rgb: u32, alpha: u8) u32 {
     return switch (mode) {
-        .normal => surface.packFill(types.Color.rgba((@as(u32, alpha) << 24) | rgb), 255, true, true),
-        .legacy => surface.packFill(types.Color.legacy(rgb), alpha, true, true),
-        .tint => |t| tintPixel(rgb, alpha, t),
-        .gamma => |g| gammaPixel(rgb, alpha, g),
+        .color => |m| surface.packFillMode(types.Color.legacy(rgb), alpha, true, true, m),
         .solid => 0xff00_0000 | rgb,
     };
-}
-
-fn tintPixel(rgb: u32, alpha: u8, t: f64) u32 {
-    const a = @as(f64, @floatFromInt(alpha)) / 255.0;
-    const k = a + t * (1.0 - a);
-    return (@as(u32, alpha) << 24) | scaleRgb(rgb, k);
-}
-
-fn gammaPixel(rgb: u32, alpha: u8, gamma: f64) u32 {
-    const a = @as(f64, @floatFromInt(alpha)) / 255.0;
-    const k = std.math.pow(f64, a, gamma);
-    return (@as(u32, alpha) << 24) | scaleRgb(rgb, k);
-}
-
-fn scaleRgb(rgb: u32, factor: f64) u32 {
-    const f = std.math.clamp(factor, 0.0, 1.0);
-    const r = scaleChannel((rgb >> 16) & 0xff, f);
-    const g = scaleChannel((rgb >> 8) & 0xff, f);
-    const b = scaleChannel(rgb & 0xff, f);
-    return (r << 16) | (g << 8) | b;
-}
-
-fn scaleChannel(v: u32, factor: f64) u32 {
-    return @intFromFloat(@round(@as(f64, @floatFromInt(v)) * factor));
 }
 
 fn rawFill(
