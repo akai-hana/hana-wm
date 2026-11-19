@@ -344,12 +344,23 @@ fn frameCtx(s: *State) segmod.DrawCtx {
     };
 }
 
+/// Re-probes for a compositor that started after the bar window was mapped.
+/// A compositor taking over does not generate an Expose for existing windows,
+/// so the surface's short retry timer is the only wake that can make alpha
+/// live; when one appears the whole row must repaint with the new packing.
+pub fn refreshCompositorIfDue(s: *State) void {
+    if (s.render.dc.maybeRefreshCompositor()) markDirty(s);
+}
+
 /// Collects live state, repaints every segment into the off-screen pixmap,
 /// queues the single xcb_copy_area blit. No flush here (cairo_surface_flush
 /// only): the caller's context flushes (end-of-batch, or ungrabAndFlush).
 pub fn performDraw() void {
     const s = state.gBar.state orelse return;
     if (!s.vis.shown) return;
+    // The scheduled probe often lands on a timeout wake; this is where that
+    // wake turns into the full repaint a newly-present compositor needs.
+    refreshCompositorIfDue(s);
     // Fold any queued module redraw request into a full dirty so a direct
     // submitDraw can never drop it (false no-op when already consumed).
     if (!s.dirty.flag) _ = foldModuleRedraw(s);
