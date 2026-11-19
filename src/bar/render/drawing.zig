@@ -348,6 +348,16 @@ pub const DrawContext = struct {
         return self.surface.refreshCompositor();
     }
 
+    /// Facade forwarder: loop deadline for the next compositor re-probe.
+    pub fn compositorProbeTimeoutMs(self: *const DrawContext) ?i32 {
+        return self.surface.compositorProbeTimeoutMs();
+    }
+
+    /// Facade forwarder: probes when due; true when a compositor appeared.
+    pub fn maybeRefreshCompositor(self: *DrawContext) bool {
+        return self.surface.maybeRefreshCompositor();
+    }
+
     /// Facade forwarder for the dev-only color-formula override.
     pub fn refreshColorMode(self: *DrawContext) bool {
         return self.surface.refreshColorMode();

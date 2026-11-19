@@ -91,6 +91,13 @@ pub fn pollTimeoutMs() ?i32 {
             if (t >= 0 and (nearest == null or t < nearest.?)) nearest = t;
         }
     }
+    // A bar mapped before its compositor has no Expose to wait for: keep a
+    // short retry wake until the surface sees the selection owned, so the
+    // alpha repaint happens on its own instead of at the next clock tick (or
+    // never, without a clock segment).
+    if (s.render.dc.compositorProbeTimeoutMs()) |t| {
+        if (nearest == null or t < nearest.?) nearest = t;
+    }
     // ...and the bar's own debt outranks them all: a frame a capped batch still
     // owes must land NOW, not at the nearest module deadline. After the hidden-bar
     // gate above, because a bar that paints nothing owes no wake.
@@ -485,6 +492,11 @@ pub fn updateIfDirty() void {
         applyFullscreenVisibility(false);
     }
     if (!s.vis.shown) return;
+
+    // Event batches are another chance to notice a compositor that appeared
+    // after the bar mapped; the scheduled timeout covers the idle case, this
+    // covers a busy session where the retry deadline lands mid-batch.
+    render.refreshCompositorIfDue(s);
 
     // Diff core's fact revisions against what we last drew. Core owns these
     // facts; we react over a one-way signal (revision counters) rather than being

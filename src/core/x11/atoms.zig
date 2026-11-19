@@ -51,6 +51,9 @@ pub const AtomCache = struct {
     _NET_WM_DESKTOP: u32,
     // X resource-database atom: read by display/dpi.zig for Xft.dpi.
     RESOURCE_MANAGER: u32,
+    // Compositor-manager selection: the bar probes its owner to decide
+    // whether ARGB alpha is blended (see bar/render/surface.zig).
+    _NET_WM_CM_S0: u32,
 };
 
 var atom_cache: ?AtomCache = null;

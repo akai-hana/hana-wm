@@ -811,3 +811,27 @@ test "packFillMode: dev families keep the alpha and take distinct curves" {
     try testing.expectEqual(@as(u32, 0x80_812626), pack(.boost25, 0x80));
     try testing.expectEqual(@as(u32, 0x80_561919), pack(.posterize4, 0x80));
 }
+
+test "compositor probe backoff doubles from the initial delay to the cap" {
+    const surface = @import("surface");
+    // The boot race wants fast retries: 100ms, 200ms, 400ms, 800ms, then the
+    // 1s idle cap. A missing compositor must not keep paying sub-second
+    // round trips for the whole session.
+    var interval = surface.compositor_probe_initial_ms;
+    try testing.expectEqual(@as(i32, 100), interval);
+    interval = surface.nextCompositorProbeMs(interval);
+    try testing.expectEqual(@as(i32, 200), interval);
+    interval = surface.nextCompositorProbeMs(interval);
+    try testing.expectEqual(@as(i32, 400), interval);
+    interval = surface.nextCompositorProbeMs(interval);
+    try testing.expectEqual(@as(i32, 800), interval);
+    interval = surface.nextCompositorProbeMs(interval);
+    try testing.expectEqual(@as(i32, 1000), interval);
+    interval = surface.nextCompositorProbeMs(interval);
+    try testing.expectEqual(@as(i32, 1000), interval);
+    // Defensive saturation for any caller that starts past the cap.
+    try testing.expectEqual(
+        @as(i32, 1000),
+        surface.nextCompositorProbeMs(std.math.maxInt(i32)),
+    );
+}
