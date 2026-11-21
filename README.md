@@ -3,7 +3,7 @@
 # hana【花】
 ###### A comfy X11 Window Manager written in Zig.
 
-![](https://github.com/akai-hana/hana-wm/releases/download/demo-gif/demonstration.gif)
+![](https://github.com/akai-hana/assets/blob/d1593f11eafa6a76944396aae454130d3071923b/demos/hana.gif)
 
 </div>
 
