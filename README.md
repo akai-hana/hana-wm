@@ -18,7 +18,7 @@
 > 1. [#introduction](#introduction) for a users' surface overview
 > 2. [#body](#body) for a curious users' more in-depth view of any particular topic
 > 
-> The code itself is also extensibly commented. And there's also templates to create new modules/plugins for hana's main extension points, also for the sake of the QoL of developers' who want to extend hana.
+> The code itself is also extensibly commented. There are also templates to create new modules/plugins for hana's main extension points, for the sake of the QoL of developers who want to extend hana.
 
 ---
 
@@ -33,12 +33,15 @@
     - [Architecture](#architecture)
     - [Configuration](#configuration)
 - [Development](#development)
+    - [Harness](#harness-end-to-end-scenarios)
+    - [Checking config](#checking-config)
 
 ---
 
 # Installation
 ```sh
 zig build
+zig build run   # or launch zig-out/bin/hana from your X startup file
 # yeah... that's pretty much it
 ```
 
@@ -48,8 +51,9 @@ zig build
 <summary><i>Dependencies</i></summary>
 <br>
 
+- Linux (hana targets Linux only)
 - Zig 0.16.0 (`build.zig.zon` pins `minimum_zig_version = "0.16.0"`)
-- An X server (e.g. Xorg)
+- An X11 server (e.g. Xorg)
 - libxcb, with its randr/XKB extensions _(for, well, everything)_
 - xcb-util-cursor (custom cursor support)
 - xcb-util-keysyms (keycode ↔ keysym conversion)
@@ -57,43 +61,41 @@ zig build
 - cairo + pango/pangocairo (bar rendering)
 > _i think this is everything, but LMK if i'm missing something ^\_^'_
 
-All of these are linked unconditionally, and their development headers are required even when a consuming sub-system (e.g. the bar) is removed from the build. `build.zig.zon`'s `.links` table names the direct entries — `xcb-keysyms`, `xkbcommon-x11`, `xcb-xkb`, `xcb-cursor`, `xcb-randr`, `pangocairo-1.0` — while libxcb, xkbcommon, cairo and pango come in transitively. (TO-DO: handle conditional dependency linkage)
+All of the libraries above are linked unconditionally, so their development headers are required even if you remove a consuming sub-system (the bar, for example). `build.zig.zon`'s `.links` table names the direct entries — `xcb-keysyms`, `xkbcommon-x11`, `xcb-xkb`, `xcb-cursor`, `xcb-randr`, `pangocairo-1.0` — while libxcb, xkbcommon, cairo and pango arrive transitively through them. (TO-DO: handle conditional dependency linkage)
 </details>
 
 ## Showcase
 
-(video showcase)
-
 <details>
-<summary><i>For a textual showcase, click here for the full set of features/characteristics hana offers (optionally o_o).</i></summary>
+<summary><i>Click here for the full feature list (optionally o_o).</i></summary>
 <br>
 
 **On window management:**
 
 - Tiling/floating paradigms are optional and removable _(at least one of them must stay for hana to compile)_
 - Various tiling layouts: master-stack, monocle, grid, fibonacci, scroll, and leaf \
-> (Some layouts include variants!; alternatives that are slightly differing in behavior, but otherwise the same layout.)
+> (Some layouts include variants! — alternatives that tweak behavior while keeping the same layout.)
 - Per-window tiling/floating _(toggleable AND configurable via float window rules)_
-- Fullscreening / Minimizing
+- Fullscreen and minimize
 - Workspaces _(window tags, multi-workspace tagging, pinning)_
-- Per-program window handling rules _(class-workspace, and class-float admission)_
+- Per-program window rules _(send a class to a workspace, or admit it as floating)_
 - Per-workspace configurations & window rules _(numbered `[workspace.rules.N]` sub-tables on the config)_
 - Drag-and-drop floating window placement with refresh-paced smooth dragging and screen edge snapping
 
 **On customizability:**
 
-- TOML-like config file splitting & auto-joining _(config can be categorically split across different files if preferred over a mono-file)_
+- TOML-like config file splitting & auto-joining _(split config across different files instead of one mono-file)_
 - Config + binary hot-reloading _(in-place; no X-session restart)_
-- Swap-able themes _(by default, split-config pallete files under `config/themes/`)_
-- Advanced binding: `{...}` glob expansion, ranged-keys, multi-action arrays, mouse bindings, placeholder substitution...
-- WM scaling across any display resolution _(DPI & resolution detection)_
+- Swappable themes _(by default, split config palette files under `config/themes/`)_
+- Advanced bindings: `{...}` glob expansion, ranged-keys, multi-action arrays, mouse bindings, placeholder substitution...
+- WM scaling across different display resolutions _(DPI & resolution detection)_
 - Drop-in module templates for community extensions _(see [`contrib/plugin-template/`](contrib/plugin-template/))_
 
 **On hana's bar:**
 
-- Modular bar (optional and replaceable if preferred) 
-- Various bar widgets by default _(workspaces, title, layout/variants indicators, clock, system-status readouts, volume/brightness drag-sliders...)_
-- Title carousel _(text effect for overflowing titles, aware and adaptable of monitor refresh rate)_
+- Modular bar _(optional, replaceable, or removable)_
+- Useful bar widgets out of the box _(workspaces, title, layout/variants indicators, clock, system-status readouts, volume/brightness drag-sliders...)_
+- Title carousel _(scrolls overflowing titles, paced to your monitor's refresh rate)_
 - Inline bar command prompt with optional vim-modal motions
 
 **On session & system integration:**
@@ -178,42 +180,45 @@ Finally, I wanted foundational source code **cleanness** and **flexibility**, bo
 
 <img alt="hana's architecture; onion 3-layer diagram" src="https://github.com/user-attachments/assets/54937208-8dd1-4525-b8f1-1cc00996fde0" />
 
-hana's codebase is an onion. At the very center sits a small, pure description of the world — what windows exist, where they are, which workspace they're on, how each workspace is arranged — with no knowledge of X11 at all. Around that center sit the logic layers that decide things: window admission, focus policy, workspaces, tiling, rendering. At the outer edge sits the wire layer: a handful of modules that turn those decisions into actual X11 traffic. It isn't one tidy directory — the tree is hub-and-spoke, not a strict import stack — so the boundary is enforced by policy instead: wire mutations belong behind the reconcile boundary, and the pure layers (`model`, `tiling`, `config`) stay xcb-free. The wire traffic that remains outside that boundary is allowlisted, with a review stamp, in `dev/scripts/check-layers.sh`.
+hana's codebase is an onion — at least in dependency terms. At the very center sits a small, pure description of the world: what windows exist, where they are, which workspace they're on, how each workspace is arranged. It knows nothing about X11. Around that center sit the layers that decide things — window admission, focus policy, workspaces, tiling, rendering — and at the outer edge sits the wire layer, where those decisions become actual X11 traffic.
 
-How to think about it: anything essential to booting a window manager must be present — `src/core/`, `src/window/` and `src/config/` — and everything else is a layer you can delete outright.
+Now, the tree itself isn't a strict import stack: core and window import each other around a shared hub, and wire traffic is spread across several modules rather than parked in one tidy directory. So the boundary is enforced by policy instead: wire mutations belong behind the reconcile boundary, and the pure layers (`model`, `tiling`, `config`) stay xcb-free. Whatever wire traffic remains outside that boundary is allowlisted in `dev/scripts/check-layers.sh`, with a review date on every entry.
 
-Don't want hana's bar? Remove the bar subsystem and recompile. Don't want tiling? Remove the tiling subsystem (or, if tiling is the point and floating isn't, delete the floating module instead — at least one of the two paradigms has to stay for hana to compile). Want the bar's inline command prompt but not its vim motions? Keep the prompt, delete the motions engine. The next compile — and, for runtime features, the next config reload or binary hot-reload — simply yields a hana without those features.
+What's mandatory is small: `src/core/`, `src/window/` and `src/config/`. Everything else is a layer you can delete outright.
 
-The directory tree is load-bearing, not just organizational: optional extensions live beside their peers — layouts beside the tiling engine, widgets beside the bar, window addons beside the window layer — and discovery is path-prefixed, so a layout is only picked up under `src/tiling/modules/`, a bar segment under `src/bar/modules/`, and a window addon under `src/window/modules/`. Within those homes, file names become registry stems: drop a `foo.zig` in the right `modules/` directory, declare the owner's module binding, and it joins that owner's registry; move it somewhere else and it stops being discovered. That gives a clear reading order (what is mandatory, what is optional, what each addition hangs onto), and it means deleting a subsystem's directory takes its whole family of extensions with it.
+Don't want hana's bar? Remove the bar sub-system and recompile. Don't want tiling? Remove it — or, if tiling is the point and floating isn't, delete the floating module instead; at least one of the two paradigms has to stay. Want the bar's inline prompt but not its vim motions? Keep the prompt, delete the motions engine. The next compile — or, for runtime features, the next config reload or binary hot-reload — yields a hana without those features.
 
-Two habits keep this honest:
+The directory tree is load-bearing, too. Optional extensions live beside their peers — layouts beside the tiling engine, widgets beside the bar, window addons beside the window layer — and discovery is path-prefixed: layouts are only picked up under `src/tiling/modules/`, bar segments under `src/bar/modules/`, and window addons under `src/window/modules/`. Within those homes, file names become registry stems. A `foo.zig` in the right `modules/` directory that declares the owner's module binding joins that owner's registry; move it somewhere else and it stops being discovered. That's what gives the tree a clear reading order (what is mandatory, what is optional, what each addition hangs onto), and it means deleting a sub-system's directory takes its whole family of extensions with it.
+
+Two habits keep the whole thing honest:
 
 1. **The core never names the optional.** It speaks only through small contract interfaces — one family for window extensions, one for the bar, one shared by every tiling layout — and at build time a registry is generated from whatever files are actually in the tree. Deleting a file removes the only reference to it: no feature flag, no dead branch, no commented-out wiring left to clean up.
-2. **State has exactly one home.** All managed window state sits in a single model layer (`src/core/model.zig`, deliberately free of X11). Membership writes — the `tiled_order` lists that keep each tiled window on exactly one workspace — are confined to a reviewed single-writer set: the model's write API plus the few callers whose semantics genuinely re-home a window. That's what keeps the state consistent no matter how many plugins are plugged in. Keyboard and mouse handling lives under `src/core/input/`, and the unit tests are grouped by area under `src/test/`.
+2. **State has exactly one home.** All managed window state sits in a single model layer (`src/core/model.zig`, deliberately free of X11). Membership writes — the `tiled_order` lists that keep each tiled window on exactly one workspace — go through a reviewed single-writer set: the model's write API plus the few callers that genuinely re-home a window. That's what keeps state consistent no matter how many plugins are plugged in. Keyboard and mouse handling lives under `src/core/input/`, and the unit tests are grouped by area under `src/test/`.
 
 Workspaces are hana's own tags — a window can live on several, be pinned to all of them, and move around without geometry drama. EWMH pagers can still switch workspaces and move windows between them, but the tag model is richer than EWMH's single-desktop view, so EWMH's all-desktops request is deliberately ignored. Per-program plus per-workspace rules shape how new windows arrive, and all of it is configurable and hot-reloadable; see [#configuration](#configuration).
 
 ## Configuration
 
-hana has dedicated, hot-reloadable config files, written in hana's own TOML-like dialect.
+hana's config lives in dedicated, hot-reloadable files written in hana's own **TOML-like dialect** — close enough to TOML to feel familiar, custom enough to fit hana's needs.
 
-> See [`config/README.md`](config/README.md) for the section reference and value
-> format details (percent vs pixel sizes, color spellings, file joining).
+> See [`config/README.md`](config/README.md) for the section reference and value format details (percent vs pixel sizes, color spellings, file joining).
 
-How to think about it: `config/config.toml` is the entry file — the only one hana reads on its own. Every other top-level `.toml` under `config/` stays unloaded (and is reported as such) until the entry file names it in its `include` list; sub-directories are never read on their own, so a file in one loads only when `include` reaches it. That naming is where the joining happens. Selecting a file simply merges its contents with the entry file.
+`config/config.toml` is the entry file — the only one hana reads on its own. Every other top-level `.toml` under `config/` (except the embedded `fallback.toml`) sits inert — and gets a warning — until the entry file names it in its `include` list. Sub-directories are never read on their own, so a file in one loads only when `include` reaches it (and that's one level deep — an included file's own `include` is ignored). That's where the joining happens: selecting a file merges its contents with the entry file.
 
 The default organization splits **functional** from **visual**: behavior lives in `config/config.toml`, while palettes and look-and-feel live under `config/themes/` and are selected by name from the config (hana ships a red one, `config/themes/akai.toml`). Selecting a theme layers it over the base, so functional preferences — window rules, tiling behavior, keybinds, workspace layouts — stay put while the appearance changes.
 
-None of that split is enforced; it's a convention. Keep one mono-config, or divide things however you like — a keybinds vocab file here, a palette there, tiling knobs somewhere else — as long as `config.toml` includes what you want loaded. Think of `include` as the config's own module system.
+None of that split is enforced; it's a convention. Keep one mono-config, or divide things however you like — a keybinds vocab file here, a palette there, tiling knobs somewhere else — as long as `config.toml` includes what you want loaded. `include` is basically the config's own module system.
 
-Everything in it hot-reloads while hana runs: a keybind, a color, a window rule — no restart, no recompile.
+And yes: everything in it hot-reloads while hana runs — a keybind, a color, a window rule — no restart, no recompile.
 
 ---
 
 # Development
 
+The dev loop:
+
 ```sh
-# format check, then the type-check + layer-guard gate, then the test suite
+# format check, then type-check + layer guards, then the test suite
 zig fmt --check .
 zig build check -Doptimize=Debug      # no-emit: full Sema, no codegen
 dev/scripts/xtest.sh zig build test -Doptimize=Debug   # THE test command: Xvfb-backed
@@ -233,11 +238,15 @@ BUILD_DEBUG=1 ./run-scenario.sh --compare S01-spawn-tiled   # run a scenario aga
 BUILD_DEBUG=1 ./run-scenario.sh --golden  S01-spawn-tiled    # re-record after an intended change
 ```
 
-Scenarios drive a real window manager on its own throwaway X server, so your session is never touched. `--compare` is a semantic diff (geometry, EWMH properties, state-dump assertions), `--compare-raw` diffs the normalized artifacts byte-for-byte, `--keep` leaves the server up for interactive debugging, and naming several scenarios runs them in sequence. The log-based assertions read info/debug log lines that release composites elide — hence `BUILD_DEBUG=1`, which builds a Debug binary first.
+Scenarios drive a real window manager on its own throwaway X server, so your session is never touched. `--compare` is a semantic diff (geometry, EWMH properties, state-dump assertions), `--compare-raw` diffs the normalized artifacts byte-for-byte, `--keep` leaves the server up for interactive debugging, and naming several scenarios runs them in sequence.
+
+The log-based assertions read info/debug log lines that release builds elide — hence `BUILD_DEBUG=1`, which builds a Debug binary first.
 
 ## Checking config
 
-`hana --check-config` validates a config through the real load path (entry file, includes, merge) and exits non-zero on any diagnostic; it needs no display. It does need a Debug build — or a release built with `-Dconfig-warn`: a plain `zig build` composites the warn diagnostics out, and in that binary the mode refuses with exit 2 rather than claiming a clean config.
+`hana --check-config` validates a config through the real load path (entry file, includes, merge) and exits non-zero on any diagnostic. It needs no display.
+
+It does need a Debug build — or a release built with `-Dconfig-warn`: a plain `zig build` compiles the warn diagnostics out, and in that binary the mode refuses with exit 2 rather than claiming a clean config.
 
 ---
 
