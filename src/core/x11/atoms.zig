@@ -44,8 +44,8 @@ pub const AtomCache = struct {
     _NET_ACTIVE_WINDOW: u32,
     // Pager/taskbar messages handled in client_events.handleClientMessage:
     // _NET_CLOSE_WINDOW is the close BUTTON (ICCCM deletion request),
-    // _NET_CURRENT_DESKTOP switches workspace, _NET_WM_DESKTOP moves a managed
-    // window. All three are advertised in requests.supported_atoms.
+    // _NET_CURRENT_DESKTOP switches workspace, _NET_WM_DESKTOP moves or pins a
+    // managed window. All three are advertised in requests.supported_atoms.
     _NET_CLOSE_WINDOW: u32,
     _NET_CURRENT_DESKTOP: u32,
     _NET_WM_DESKTOP: u32,

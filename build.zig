@@ -117,6 +117,11 @@ pub fn build(b: *std.Build) !void {
     // test stderr as `failed command:` even on success).
     const bench_enabled = b.option(bool, "bench", "Run latency/benchmark tests with full iteration counts and timing output (opt-in; off by default)") orelse false;
     build_opts.addOption(bool, "bench", bench_enabled);
+    // Root-cursor theming is the one core library dependency that can be
+    // dropped without deleting a subsystem: xcb-util-cursor is used only by
+    // src/core/input/cursor.zig, and that file no-ops when this is off.
+    const cursor_enabled = b.option(bool, "cursor", "Theme the root cursor via xcb-util-cursor (default on)") orelse true;
+    build_opts.addOption(bool, "has_cursor", cursor_enabled);
 
     // Module discovery — runs before has_* probes so file-existence flags can
     // be derived from the discovered module set instead of re-probing the
@@ -231,10 +236,10 @@ pub fn build(b: *std.Build) !void {
         .owner_modules = owner_modules,
     };
 
-    const root_mod = try wireRootModule(b, target, optimize, has_usr, shared_ctx, &discovery);
-    const unit_test_step = try wireUnitTests(b, &discovery, features, test_filter);
+    const root_mod = try wireRootModule(b, target, optimize, has_usr, shared_ctx, &discovery, features, cursor_enabled);
+    const unit_test_step = try wireUnitTests(b, &discovery, features, cursor_enabled, test_filter);
     buildExeAndRunStep(b, root_mod);
-    wireColorDemoStep(b, &discovery, has_usr, target, optimize, shared_ctx);
+    wireColorDemoStep(b, &discovery, has_usr, target, optimize, shared_ctx, features, cursor_enabled);
     wireBenchStep(b, bench_enabled, unit_test_step);
     try wireCheckSteps(b, root_mod, &discovery, features, shared_ctx, has_usr, target, optimize);
 
@@ -634,6 +639,8 @@ fn wireRootModule(
     has_usr: UsrDirs,
     shared_ctx: SharedBuildContext,
     discovery: *Module.DiscoveryContext,
+    features: FeatureSet,
+    cursor_enabled: bool,
 ) !*std.Build.Module {
     const root_mod = b.createModule(.{
         .root_source_file = b.path(entry_point_path),
@@ -651,7 +658,7 @@ fn wireRootModule(
     finalizeModule(root_mod, optimize, has_usr);
     try Module.wireAll(b, root_mod, &discovery.modules, &discovery.source_paths, shared_ctx);
     try SystemLibraries.loadLinks(b);
-    SystemLibraries.link(root_mod);
+    SystemLibraries.link(root_mod, features, cursor_enabled);
     // Discovered modules don't inherit root_mod's include/library paths, so
     // give each one the same system paths for its @cImport / link work.
     var mod_it = discovery.modules.valueIterator();
@@ -671,6 +678,7 @@ fn wireUnitTests(
     b: *std.Build,
     discovery: *Module.DiscoveryContext,
     features: FeatureSet,
+    cursor_enabled: bool,
     test_filter: ?[]const u8,
 ) !*std.Build.Step {
     // Tests must run through the build rather than a bare `zig test <file>`:
@@ -805,7 +813,7 @@ fn wireUnitTests(
             // exe: modules reached from a test graph may call X11/cairo
             // directly (window, drawing, ...) and get no linkage second-hand
             // from a blanket cross-wire.
-            SystemLibraries.link(entry.*);
+            SystemLibraries.link(entry.*, features, cursor_enabled);
             // The custom test runner (below) compiles as this binary's root
             // source and @imports "diagnostics" to route captured warn/err
             // lines into the check-config bag (src/config/diagnostics.zig).
@@ -847,6 +855,8 @@ fn wireColorDemoStep(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     shared_ctx: SharedBuildContext,
+    features: FeatureSet,
+    cursor_enabled: bool,
 ) void {
     const mod = b.createModule(.{
         .root_source_file = b.path("dev/tools/color_demo.zig"),
@@ -858,7 +868,7 @@ fn wireColorDemoStep(
     injectShared(mod, shared_ctx);
     var it = discovery.modules.iterator();
     while (it.next()) |entry| mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
-    SystemLibraries.link(mod);
+    SystemLibraries.link(mod, features, cursor_enabled);
 
     const exe = b.addExecutable(.{ .name = "hana-color-demo", .root_module = mod });
     const run = b.addRunArtifact(exe);
@@ -3569,8 +3579,15 @@ const SystemLibraries = struct {
         links = parsed.links;
     }
 
-    /// Links the system libraries declared in build.zig.zon.
-    fn link(root: *std.Build.Module) void {
-        for (links) |lib| root.linkSystemLibrary(lib, .{});
+    /// Links the system libraries declared in build.zig.zon, skipping those
+    /// that only a removable subsystem or build option needs. cairo/pango and
+    /// xcb-keysyms are bar-only; xcb-cursor is gated by `-Dcursor`.
+    fn link(root: *std.Build.Module, features: FeatureSet, cursor_enabled: bool) void {
+        for (links) |lib| {
+            if (!features.has_bar and
+                (std.mem.eql(u8, lib, "pangocairo-1.0") or std.mem.eql(u8, lib, "xcb-keysyms"))) continue;
+            if (!cursor_enabled and std.mem.eql(u8, lib, "xcb-cursor")) continue;
+            root.linkSystemLibrary(lib, .{});
+        }
     }
 };

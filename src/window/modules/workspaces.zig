@@ -181,6 +181,26 @@ pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
     reconcile_tails.retile(.{ .mode = .focus }, ft);
 }
 
+/// EWMH `_NET_WM_DESKTOP` set form. `null` means all desktops (pin);
+/// a value means that workspace, clearing a pin first.
+pub fn setDesktop(win: model.WindowId, target: ?u8) void {
+    const m = pipeline.mut();
+    if (!canTagChange(m, win)) return;
+    const e = m.store.getPtr(win) orelse return;
+
+    if (target) |ws_idx| {
+        if (!core.isValidWorkspaceIndex(ws_idx)) return;
+        // A specific-desktop request also leaves all-desktops mode.
+        if (model.isPinned(e.*)) e.mask = model.bit(m.current);
+        moveToWorkspace(win, ws_idx);
+        return;
+    }
+
+    if (model.isPinned(e.*)) return;
+    e.mask = model.ALL_MASK;
+    reconcile_tails.retile(.{}, null);
+}
+
 /// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag
 /// gesture); removing the CURRENT tag evicts the window and re-focuses.
 pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
@@ -358,6 +378,7 @@ pub const module: @import("window_contract").WindowModule = .{
     .command = .{
         .switchWorkspace = switchWorkspace,
         .moveToWorkspace = moveToWorkspace,
+        .setDesktop = setDesktop,
         .toggleTag = toggleTag,
         .pinWindow = pinWindow,
         .allWorkspaces = allWorkspaces,

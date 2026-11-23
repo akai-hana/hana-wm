@@ -20,7 +20,7 @@
 //!   The `_NET_CLOSE_WINDOW` / `_NET_CURRENT_DESKTOP` / `_NET_WM_DESKTOP`
 //!   pager messages (P1-08: advertised, so they must actually work) must
 //!   reach the shared ICCCM close path, the switchWorkspace hook, and the
-//!   moveToWorkspace hook respectively, with their guards: no close of an
+//!   setDesktop hook respectively, with their guards: no close of an
 //!   unmanaged window, no workspace index hana doesn't have.
 //!   `_NET_ACTIVE_WINDOW` activation (taskbar/pager clicks) must focus the
 //!   target through the normal focus prepare/apply path and advertise it on
@@ -504,7 +504,7 @@ test "EWMH: _NET_CURRENT_DESKTOP switches workspace; an unknown desktop is dropp
     try std.testing.expectEqual(@as(u8, 2), m.current.index);
 }
 
-test "EWMH: _NET_WM_DESKTOP moves a managed window; guards drop the rest" {
+test "EWMH: _NET_WM_DESKTOP moves or pins a managed window; guards drop the rest" {
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
     const m = pipeline.state();
@@ -530,13 +530,21 @@ test "EWMH: _NET_WM_DESKTOP moves a managed window; guards drop the rest" {
     const still = m.store.get(w1) orelse return error.UnknownWindow;
     try std.testing.expect(model.taggedOn(still, model.WSId.fromIndex(3)));
 
-    // 0xFFFFFFFF ("all workspaces") has no per-window meaning in hana's
-    // model (all-view is a global mode), so it must not clear the tag either.
+    // 0xFFFFFFFF ("all desktops") pins the window: every tag bit set.
     ev.data.data32[0] = 0xFFFFFFFF;
     window.handleClientMessage(&ev);
     fx.flush();
-    const sticky = m.store.get(w1) orelse return error.UnknownWindow;
-    try std.testing.expect(model.taggedOn(sticky, model.WSId.fromIndex(3)));
+    const pinned = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(model.isPinned(pinned));
+
+    // A specific desktop clears the pin and moves the window there.
+    ev.data.data32[0] = 1;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    const unpinned = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(!model.isPinned(unpinned));
+    try std.testing.expect(model.taggedOn(unpinned, model.WSId.fromIndex(1)));
+    try std.testing.expect(!model.taggedOn(unpinned, model.WSId.fromIndex(3)));
 
     // Unmanaged target: the hook is never called, nothing enters the store.
     const stranger = fx.createWindow();

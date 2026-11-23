@@ -14,7 +14,7 @@
 //!      (_NET_ACTIVE_WINDOW → focus.grabFocus with the visibility guards,
 //!      _NET_CLOSE_WINDOW → shared ICCCM closeViaProtocol,
 //!      _NET_CURRENT_DESKTOP → switchWorkspace hook, _NET_WM_DESKTOP →
-//!      moveToWorkspace hook; advertised in requests.supported_atoms).
+//!      setDesktop hook; advertised in requests.supported_atoms).
 //!      Owns the warn-once latches: a looping pager would otherwise flood
 //!      the log, and the latches reset with the rest of the window layer's
 //!      init discipline (window.init calls `reset`).
@@ -373,17 +373,17 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     // _NET_WM_DESKTOP: pager drag -- move a managed window to another
-    // workspace. data32[0] = 0-based target; 0xFFFFFFFF means "all
-    // workspaces", which hana has no per-window membership for (the
-    // all-workspaces VIEW is a global mode, not a tag), so that limb is
-    // dropped the same way an out-of-range target is.
+    // workspace, or pin it to all of them. data32[0] is the 0-based target;
+    // 0xFFFFFFFF means "all desktops", which hana maps to its pinned state.
     const net_wm_desktop = atoms.getAtomOrZero("_NET_WM_DESKTOP");
     if (net_wm_desktop != 0 and event.type == net_wm_desktop) {
         const win = event.window;
         if (query.isValidManagedWindow(win)) {
             const ws = event.data.data32[0];
-            if (ws != 0xFFFFFFFF and ws < query.getWorkspaceCount()) {
-                registry.command.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(ws)) });
+            if (ws == 0xFFFFFFFF) {
+                registry.command.callHook(.setDesktop, .{ win, @as(?u8, null) });
+            } else if (ws < query.getWorkspaceCount()) {
+                registry.command.callHook(.setDesktop, .{ win, @as(?u8, @intCast(ws)) });
             }
         }
         return;
