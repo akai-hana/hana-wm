@@ -252,6 +252,6 @@ It does need a Debug build — or a release built with `-Dconfig-warn`: a plain 
 
 <div align="center">
 
-</> with <3 by [akai_hana](https://github.com/akai-hana)
+</> with <3 @ [akai_hana](https://github.com/akai-hana)
 
 </div>
