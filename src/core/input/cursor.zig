@@ -10,6 +10,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const log = std.log.scoped(.cursor);
 const mouse = @import("mouse");
+const build_options = @import("build_options");
 
 /// libxcb-cursor declarations, hand-written because `xcb_cursor_load_cursor` is
 /// a static inline function in the C header, which cImport cannot bind.
@@ -26,6 +27,8 @@ extern fn xcb_cursor_context_free(ctx: ?*Context) void;
 /// Applies the user's cursor theme to the root window; falls back silently if
 /// xcb-cursor is unavailable or the cursor cannot be loaded.
 fn setupRoot(conn: core.Connection, screen: core.Screen) void {
+    if (comptime !build_options.has_cursor) return;
+
     var cursor_ctx: ?*Context = null;
     if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0) return;
     defer xcb_cursor_context_free(cursor_ctx);

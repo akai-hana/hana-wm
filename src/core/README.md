@@ -27,7 +27,7 @@ name.
 - `input/` is keyboard and mouse handling (`dispatch`, `keybinds`, `keymap`,
   `keys`, `masks`, `mouse`, `xkb`, `cursor`).
 - `loop/` is the event loop and pipeline (`events.zig`, `pipeline.zig`).
-- `x11/` is the wire layer (`xcb`, `atoms`, `requests`, `sink`, `reconcile`).
+- `x11/` is the wire edge (`xcb`, `atoms`, `requests`, `sink`, `reconcile`).
   Mutations go through `reconcile`; the pure layers stay xcb-free.
 - `display/` derives DPI, refresh rate, scaling, and usable area.
 - `process/` covers spawning and session handling.
@@ -38,6 +38,6 @@ name.
 
 `dev/scripts/check-layers.sh` enforces the wire/pure split: `model`, `tiling`,
 and `config` must not import xcb, and wire traffic outside the reconcile
-boundary is allowlisted with a review date. `dev/scripts/check-modularity.sh`
+boundary is allowlisted. `dev/scripts/check-modularity.sh`
 builds the feature-deletion matrix. Keep new pure logic pure, and put X11
 traffic behind the sink/reconcile boundary.

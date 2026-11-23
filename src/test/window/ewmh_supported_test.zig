@@ -33,7 +33,7 @@ const handled = [_]struct { name: []const u8, where: []const u8 }{
     .{ .name = "_NET_WM_PID", .where = "admission.zig pid prop query" },
     .{ .name = "_NET_CLOSE_WINDOW", .where = "client_events.zig -> window.closeViaProtocol (icccm.zig)" },
     .{ .name = "_NET_CURRENT_DESKTOP", .where = "client_events.zig -> switchWorkspace hook" },
-    .{ .name = "_NET_WM_DESKTOP", .where = "client_events.zig -> moveToWorkspace hook" },
+    .{ .name = "_NET_WM_DESKTOP", .where = "client_events.zig -> setDesktop hook" },
     .{ .name = "_NET_ACTIVE_WINDOW", .where = "client_events.zig -> focus.grabFocus(.user_command) + focus.zig advertise" },
     .{ .name = "_NET_WM_WINDOW_TYPE_DOCK", .where = "protocol/struts.zig isDock -> admission float + strut publish" },
     .{ .name = "_NET_WM_STRUT_PARTIAL", .where = "protocol/struts.zig -> usable_area dock claims" },

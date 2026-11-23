@@ -1,0 +1,3 @@
+remove error codes, major and minor, resource ids, etc. pointless.
+
+simplify brightness and volume two-direction fallback logic into a single, generic, unambiguous, all-working path.

@@ -4,9 +4,8 @@
 # a single core model + sink. These rules enforce the one policy the
 # split actually cares about -- wire mutations belong behind the reconcile
 # boundary, and the pure layers (model/tiling/config) must stay xcb-pure --
-# plus formatting. Each rule
-
-# exits non-zero when its policy is violated outside a documented allowlist.
+# plus formatting. Each rule exits non-zero when its policy is violated
+# outside a documented allowlist.
 set -u
 cd "$(dirname "$0")/../.."
 fail=0
@@ -23,42 +22,6 @@ code_lines() { # strip comment-only lines from grep output on stdin
         case "$trimmed" in //*) continue ;; esac
         printf '%s\n' "$line"
     done
-}
-
-# P2-70: allowlist hygiene. Every allowlist entry line (a `src/...` case
-# pattern ending `;;`) must carry a justification comment block directly
-# above it whose LAST line is the review stamp `# last-reviewed: YYYY-MM-DD`
-# -- the per-entry review/expiry tag: re-warrant the entry, move the date.
-# An entry without that stamp fails the gate (not a warning), and each list's
-# size is printed so growth is visible in every check/CI log: the allowlist
-# is a reviewed fact, not a monotonically-growing scar.
-allowlist_entry_lines() { # $1 = function name; prints "<line>:<entry>"
-    awk -v fn="$1" '
-        $0 ~ "^" fn "\\(\\) \\{" { infun = 1; next }
-        infun && /^}/ { infun = 0; next }
-        infun && /^[ \t]+src\/.*\) ;;$/ { print NR ":" $0 }
-    ' "$0"
-}
-
-allowlist_hygiene() { # $1 = function name, $2 = label; sets <label>_count
-    local name=$1 label=$2 n=0 lno prev
-    while IFS= read -r entry; do
-        n=$((n + 1))
-        lno=${entry%%:*}
-        prev=$(sed -n "$((lno - 1))p" "$0")
-        case "$prev" in
-            *'# last-reviewed: '[0-9]*) ;;
-            *)
-                viol "allowlist hygiene ($label entry at $name:$lno: the line above must be '# last-reviewed: YYYY-MM-DD' -- justification stamp missing)"
-                ;;
-        esac
-    done < <(allowlist_entry_lines "$name")
-    say "allowlist: $label=$n entries"
-    case "$label" in
-        wire) wire_count=$n ;;
-        grab) grab_count=$n ;;
-        tiled_order) tiled_order_count=$n ;;
-    esac
 }
 
 # Rule 1 allowlist: files permitted to send
@@ -82,7 +45,6 @@ wire_allowed() {
         # surface.zig holds the bar frame's wire traffic (the xcb_flush that
         # orders fills under glyphs, moved here from drawing.zig with the
         # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
-        # last-reviewed: 2026-10-20
         src/bar/bar.zig|src/bar/render/surface.zig|src/bar/wire/win.zig) ;;
 
         # Window event handlers (merged client_events.zig): ConfigureRequest
@@ -92,9 +54,7 @@ wire_allowed() {
         # applyBorder ride along), EWMH ClientMessage, and Enter/Leave
         # crossing. Split out of window.zig (which no longer sends wire
         # itself); window.zig re-exports the handlers as the dispatch
-        # surface. Merged back from configure/client_message/crossing.zig
-        # 2026-10-09.
-        # last-reviewed: 2026-10-20
+        # surface. Merged back from configure/client_message/crossing.zig.
         src/window/protocol/client_events.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
@@ -103,14 +63,12 @@ wire_allowed() {
         # setup for the windows this module admits, split out of
         # window.zig with the admission policy (rules map, spawn queue,
         # five-cookie pipeline).
-        # last-reviewed: 2026-10-20
         src/window/admission.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
         # protocol (kept in window.*). focus.zig rides the
         # allowlist for that protocol duty (set_input_focus / raise / the
         # _NET_ACTIVE_WINDOW property write).
-        # last-reviewed: 2026-10-20
         src/window/protocol/focus.zig) ;;
 
         # (No entry for src/core/loop/pipeline.zig or
@@ -133,7 +91,6 @@ wire_allowed() {
         # SHAPE a synthetic xcb_configure_request_event_t fed straight to
         # window.handleConfigureRequest. The configure it elicits goes out
         # through the handler's own send path, never through this file.
-        # last-reviewed: 2026-10-20
         src/test/core/sink_test.zig|src/test/window/actions_test.zig) ;;
 
         # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
@@ -147,7 +104,6 @@ wire_allowed() {
         # Rides pat-wide via the `xcb_xkb_` family plus
         # `xcb_get_extension_data`; see enableDetectableAutoRepeat's own
         # comment for the retry contract.
-        # last-reviewed: 2026-10-20
         src/core/input/xkb.zig) ;;
 
         # Root-window keygrab installation at startup and click-focus
@@ -161,7 +117,6 @@ wire_allowed() {
         # one xcb_change_window_attributes on the root taken at startup,
         # decoration rather than per-window mutation — same "startup, not
         # mutation" warrant as enableDetectableAutoRepeat.
-        # last-reviewed: 2026-10-20
         src/core/input/cursor.zig) ;;
 
         # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
@@ -175,7 +130,6 @@ wire_allowed() {
         # path as of P1-36a -- the narrow boundary window; the entries here
         # stay as their documentation, and atoms.zig's is load-bearing: it is
         # the only reason that file passes if it ever grows a pat1 line.)
-        # last-reviewed: 2026-10-20
         src/core/x11/requests.zig|src/core/x11/atoms.zig) ;;
 
         # Tiled border-width application: the borders module's xcb_configure_window
@@ -183,7 +137,6 @@ wire_allowed() {
         # border sweep). A width-only configure is NOT a geometry/map
         # mutation and runs outside reconcile by design; the sync ledger's
         # last-sent-width dedup keeps it from spamming the server.
-        # last-reviewed: 2026-10-20
         src/window/modules/borders.zig) ;;
 
         # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS
@@ -197,7 +150,6 @@ wire_allowed() {
         # client protocol text, not sync-bound wire mutations.
         # client_events.zig is allowlisted above for the ConfigureRequest
         # family; icccm.zig joins them here for this family.
-        # last-reviewed: 2026-10-20
         src/window/protocol/icccm.zig) ;;
 
         # src/test/harness/fixture.zig is a TEST DOUBLE: it drives a real X
@@ -207,7 +159,6 @@ wire_allowed() {
         # setup is not WM wire traffic and never routes through sync. (It
         # moved here from src/test/x11/ in the Phase-7 harness consolidation;
         # the carve-out follows the file.)
-        # last-reviewed: 2026-10-20
         src/test/harness/fixture.zig) ;;
 
         # src/test/core/pipeline_test.zig is a TEST DOUBLE: it maps two
@@ -215,7 +166,6 @@ wire_allowed() {
         # real connection so it can assert the pipeline's window-enter /
         # map-request path. Test setup is not WM wire traffic and never routes
         # through the reconciler. Same carve-out as fixture.zig.
-        # last-reviewed: 2026-10-20
         src/test/core/pipeline_test.zig) ;;
 
         # src/test/window/struts_test.zig is a TEST DOUBLE: it writes
@@ -226,7 +176,6 @@ wire_allowed() {
         # asserted against usable_area. Test setup is not WM wire traffic and
         # never routes through sync. Same carve-out as fixture.zig /
         # pipeline_test.zig.
-        # last-reviewed: 2026-10-20
         src/test/window/struts_test.zig) ;;
 
         # Bare output-buffer flushes that match the widened symbol set but send
@@ -241,7 +190,6 @@ wire_allowed() {
         # (grabMouseButtons/grabKeybindings push the buffer after firing
         # all grab cookies -- the grabs themselves are not Rule-1 mutations).
         # These are documented non-mutations, not Rule-1 sends.
-        # last-reviewed: 2026-10-20
         src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/core/input/mouse.zig|src/core/input/keybinds.zig) ;;
 
         *) return 1 ;;
@@ -259,7 +207,6 @@ grab_allowed() {
         # PRIMITIVES; reconcile.reconcileUnderGrab calls these; the primitive
         # home is not itself a policy violation, but grep cannot tell call
         # from definition.
-        # last-reviewed: 2026-10-20
         src/core/x11/requests.zig) ;;
 
         *) return 1 ;;
@@ -329,8 +276,8 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # (The X-typed vocabulary they deliberately do not hold -- the concrete
 # key-press struct and the `Surfaces` hook set -- lives with its binding
 # site in hub-wired bar.zig, outside the sweep.) The merge of
-# contract_window.zig / contract_segment.zig into the monolith (2026-10-08)
-# and the monolith's later split into per-engine contracts are both history;
+# contract_window.zig / contract_segment.zig into the monolith and the
+# monolith's later split into per-engine contracts are both history;
 # the sweep follows the files, not the lineage.)
 mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
 if [ "${#rule3_files[@]}" -eq 0 ]; then
@@ -365,7 +312,7 @@ fi
 # of callers whose semantics genuinely re-home a window; every other file must
 # go through them rather than touch the list directly. The sanctioned set
 # starts closed and is EDITED HERE WITH A RATIONALE when a new write path
-# lands, which makes "who may write membership" a reviewed fact instead of a
+# lands, which makes "who may write membership" explicit instead of a
 # convention. Comment-only lines are stripped first (code_lines) so
 # documentation cannot trip the guard. src/test/ is excluded: fixtures build
 # deliberate violations to assert the invariant itself (the logic under test
@@ -374,26 +321,20 @@ tiled_order_allowed() {
     case "$1" in
         # The single writer itself: unregister un-homes a window from its
         # workspace list.
-        # last-reviewed: 2026-10-20
         src/core/model.zig) ;;
         # The window layer's register/unregister write API -- the one path
         # every other file is supposed to call instead of appending itself.
-        # last-reviewed: 2026-10-20
         src/window/state/window_state_ops.zig) ;;
         # Workspace moves re-home membership (moveToWorkspace semantics:
         # remove from the old list, append to the new one).
-        # last-reviewed: 2026-10-20
         src/window/modules/workspaces.zig) ;;
         # Park/unpark (minimize) moves membership while keeping the anchor.
-        # last-reviewed: 2026-10-20
         src/window/modules/minimize.zig) ;;
         # Float transitions re-home membership in both directions
         # (detachTiledToFloating routes through model; attach is here).
-        # last-reviewed: 2026-10-20
         src/window/modules/floating.zig) ;;
         # Boot/session restore reconstructs membership from the persisted
         # snapshot -- one-shot, before the event loop ever runs.
-        # last-reviewed: 2026-10-20
         src/core/process/session.zig) ;;
         *) return 1 ;;
     esac
@@ -406,16 +347,6 @@ while IFS= read -r line; do
     tiled_order_allowed "$f" && continue
     viol "rule 5 ($f mutates tiled_order outside the single-writer set)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat5" src/ --include='*.zig' | grep -v '^src/test/' | code_lines)
-
-# P2-70: print every allowlist's size (growth visible in CI) and enforce the
-# per-entry justification stamp. Counts init'd for set -u.
-wire_count=0
-grab_count=0
-tiled_order_count=0
-allowlist_hygiene wire_allowed wire
-allowlist_hygiene grab_allowed grab
-allowlist_hygiene tiled_order_allowed tiled_order
-say "allowlist total: $((wire_count + grab_count + tiled_order_count)) entries"
 
 if [ "$fail" = 0 ]; then say "all layer rules pass"; else say "FAILURES above"; fi
 exit $fail

@@ -137,6 +137,9 @@ pub const CommandHooks = struct {
     switchWorkspace: ?*const fn (u8) void = null,
     /// Move a window to a single tag (`move_to_workspace`).
     moveToWorkspace: ?*const fn (model.WindowId, u8) void = null,
+    /// EWMH set form: `null` pins to all desktops, a value moves to that
+    /// desktop (clearing a pin first).
+    setDesktop: ?*const fn (model.WindowId, ?u8) void = null,
     /// Toggle tag `ws` on a window (`toggle_tag`); `protect_current` keeps
     /// the current-workspace bit on add.
     toggleTag: ?*const fn (model.WindowId, u8, bool) void = null,
