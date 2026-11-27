@@ -19,6 +19,7 @@
 
 - [Introduction](#introduction)
     - [About 花](#about-花)
+    - [Objectives](#objectives)
     - [Motivations](#motivations)
 - [Installation](#installation)
     - [Permissions](#permissions)
@@ -42,22 +43,47 @@
 ## About 花
 
 **hana** is a dynamic X window manager written in Zig, focused in **modularity**, **flexibility**, and **user-friendliness**. \
-It includes both tiling and floating window management sub-systems, as well as an integrated status bar.
+It includes tiling and floating window management, an integrated status bar, TOML configuration, and binary/config hot-reloading.
 
-All of hana's systems and extensions are modular; if one isn't mandatory for hana to boot, it can be removed at will, deleting their source code and re-compiling the binary.
+**This window manager is fully modular.** All the different components are divided in systems/sub-systems and components, and organized in a hierarchical dir structure, and the build system wires them up on comptime. Any system or component that isn't strictly necessary can be removed from the dir structure, and the binary will exclude them on recompilation.
 
 ---
 
-The highest priority of this WM is to be as **modular** as possible. It achieves this by isolating the source code of all of hana's different systems, as well as developing hana's core systems to make any logic that isn't mandatory **optional** instead. Then, it becomes a matter of eliminating its associated codefile/directory, making hana's core automatically **adapt** to the presence/absence of sub-systems/modules on the next recompile and reload/hot reload.
+## Objectives
 
-Basically, sub-systems (e.g. tiling, floating, the status bar...), as well as their extensions (e.g. tiling layouts, status bar segments...), act as modules to hana. They can be removed, or moved out of hana's `src/` directory, and a new hana binary is produced on recompilation, stemming from the new codebase.
+The highest priority of this WM is to be as **modular** as possible. It achieves this by dividing hana's code into its different segments:
 
-Thanks to this, the user achieves two things:
+```
+$ tree src -L 1
+src
+├── bar
+├── config
+├── core
+├── main.zig
+├── test
+├── tiling
+└── window
+```
 
-**1.** Sub-systems are added/removed by moving their source code in/out and re-compiling.
-   > The new binary won't include logic that isn't used, and the logic of optional sub-systems is self-contained: no module will mangle the rest of the codebase, not creeping back into hana's core, and instead sitting on top of it.
-   >
-   > Any community "patches" become self-contained, auto-organized (organized by design), and easily manageable.
+Aside from the main loop, all other features are organized into sub-directories, each containing one system.
+
+Each system has one eponymous file directly inside it (e.g. `bar/bar.zig`), which depending on the system, acts as either a dispatch engine, or facade of sorts, acting as a central coordinator of its system, managing the sub-systems and components under it.
+
+Sub-systems are ().
+
+Components act as pluggable extensions to a sub-system (e.g. the different tiling layouts of the tiling system). \
+Components are found on a `modules/` sub-directory, which systems may contain directly under them (e.g. `window/modules/`). This special sub-directory acts as a hub to codefiles that only communicate through the system's contract: the components self-declare against the contract, so that they can be removed at will without leaving any code traces on the rest of the codebase.
+
+On comptime, the build system (`build.zig`) adaptively connects all the codefiles, and produces a binary that only contains the features that were compiled into it.
+
+---
+
+## Benefits
+
+Some of the benefits that modularity brings:
+
+- Patches which extend hana are self-contained codefile components.
+> They aren't applied over existing code, don't leave lingering code on removal, and
 
 **2.** Features _within_ each sub-system can be added/removed in order to extend _that_ particular sub-system _(e.g. `src/tiling/modules/master.zig` extends the tiling system with a master-stack tiling layout)_.
    > This is what makes hana organized by design: thanks to the dir/file structure it is clear what does what, which belongs to where, and who sits on top/below of whoever else.
