@@ -22,6 +22,11 @@
 //! force_restack bar raise so chrome stays topmost, and is elided when no
 //! floating window is present.
 //!
+//! PINNED FLOATS ABOVE FULLSCREEN. A float pinned to every workspace
+//! (`pin_window`) is the one window a covering winner does NOT park: it stays
+//! at its floating rect and the same RE-ASSERT phase replays it above the
+//! cover. Unpinned floats and tiled windows still yield the screen.
+//!
 //! RESIZE-PARKED (opt-in, Opts.resize_parked): armed ONLY by the bar
 //! visibility toggle (its workarea change must reach every workspace while the
 //! normal pass computes only the current one), deliberately NOT by the
@@ -146,9 +151,9 @@ pub fn forget(win: model.WindowId) void {
 /// must re-park it instead of taking the elision. MANAGED windows only: an
 /// unmanaged client's configure says nothing about our park.
 pub fn markParkedDirty(win: model.WindowId) void {
-    const e = sentGet(win) orelse return;
-    if (!e.parked) return; // only the parked fast path can elide a repair
-    st.sent.getPtr(win).?.parked_dirty = true;
+    const e = st.sent.getPtr(win) orelse return;
+    // Only the parked fast path can elide a repair.
+    if (e.parked) e.parked_dirty = true;
 }
 
 /// Record a border width sent for `win` without disturbing the ledger's
@@ -451,16 +456,15 @@ fn resizeParkedForWorkspaces(m: *const model.Model, ctx: *Ctx) void {
 /// can shadow it); else the fused loop elects the first non-parked desire.
 /// Mirrors computeDesire via `desireIsNonParked` with has_kept_rect = false.
 fn seedWinner(m: *const model.Model, plan: *const Plan) ?model.WindowId {
-    var winner: ?model.WindowId = plan.fs_win;
-    if (winner == null) if (m.focused) |f| blk: {
-        const slot = m.store.indexOf(f) orelse break :blk;
-        const fe = m.store.at(slot).val.*;
-        const placement = placementOfSlot(&plan.placements, &plan.pl_of_slot, slot);
-        const on_cur = model.visibleEntry(m, &fe, m.current);
-        if (fe.presence == .present and desireIsNonParked(fe, plan.fs_win, placement, false, on_cur))
-            winner = f;
-    };
-    return winner;
+    if (plan.fs_win) |fs| return fs;
+    const f = m.focused orelse return null;
+    const slot = m.store.indexOf(f) orelse return null;
+    const fe = m.store.at(slot).val.*;
+    const placement = placementOfSlot(&plan.placements, &plan.pl_of_slot, slot);
+    const on_cur = model.visibleEntry(m, &fe, m.current);
+    if (fe.presence == .present and desireIsNonParked(fe, plan.fs_win, placement, false, on_cur))
+        return f;
+    return null;
 }
 
 /// Phase 3: one fused loop over the store: compute a window's desire, then
@@ -606,13 +610,20 @@ fn planShow(last: SentEntry, rect: model.Rect, bw: u16, pixel: u32, is_winner: b
 
 /// Raise bookkeeping for the float re-assert (file header): a raised FLOAT
 /// records its new top slot; a raised TILED window, a newly sent tiled frame,
-/// or a float coming on screen all arm the re-assert.
+/// or a float coming on screen all arm the re-assert. A raised COVER also arms
+/// it: the pinned floats must be replayed back above the window that was just
+/// lifted over them.
 fn armReassert(e: *const model.Entry, win: model.WindowId, p: ShowPlan, reassert: *bool) void {
-    if (p.raise) {
-        if (e.anchor == .floating) floatRaise(win) else reassert.* = true;
+    const covering = e.presence == .covering;
+    switch (e.anchor) {
+        .floating => {
+            if (p.raise) floatRaise(win);
+            if (p.first_send or p.unpark or (covering and p.raise)) reassert.* = true;
+        },
+        .tiled => {
+            if (p.raise or p.first_send) reassert.* = true;
+        },
     }
-    if (p.first_send and e.anchor == .tiled) reassert.* = true;
-    if (e.anchor == .floating and (p.first_send or p.unpark)) reassert.* = true;
 }
 
 /// Visibility concern: the park transition. Re-send on the transition OR when
@@ -678,29 +689,43 @@ fn sendConfigure(
 /// Phase 4 (conditional, armed per the file header): re-assert the floating
 /// layer above every tiled window by replaying the ledger's float raise order
 /// bottom-first, so overlapping floats keep their exact click/drag order.
-/// Covered siblings park offscreen under a fullscreen winner. Floats not yet
-/// in the order are adopted at the top first.
+/// Under a fullscreen winner the layer narrows to pinned floats, replayed
+/// above the cover; covered siblings park offscreen. Floats not yet in the
+/// order are adopted at the top first.
 fn reassertFloats(m: *const model.Model, ctx: *Ctx, plan: *const Plan) void {
-    if (plan.fs_win != null) return;
-
-    // Adopt: every visible float holds a slot before the replay reads the
-    // order (one pass; no wire traffic of its own).
+    // Adopt: every float in this pass's layer holds a slot before the replay
+    // reads the order (one pass; no wire traffic of its own).
     const count = m.store.count();
     for (0..count) |i| {
         const it = m.store.at(i);
         const e: *const model.Entry = it.val;
-        if (e.presence != .present or e.anchor != .floating) continue;
-        if (!model.visibleEntry(m, e, m.current)) continue;
+        if (!inFloatLayer(m, e, it.key, plan.fs_win)) continue;
         if (!floatContains(it.key)) floatRaise(it.key);
     }
 
     // Replay bottom -> top, so the order list's last entry ends topmost.
     for (floatOrder()) |win| {
         const e = m.store.get(win) orelse continue;
-        if (e.presence != .present or e.anchor != .floating) continue;
-        if (!model.visibleEntry(m, &e, m.current)) continue;
+        if (!inFloatLayer(m, &e, win, plan.fs_win)) continue;
         ctx.sink.stackOnly(win, .above);
     }
+}
+
+/// Membership in the float layer the re-assert replays on the current
+/// workspace. Without a cover that is every visible float. Under a covering
+/// winner the layer is only the floats pinned to all workspaces: the covering
+/// window itself (anchor preserved, presence `.covering`) and unpinned floats
+/// are not in it.
+fn inFloatLayer(
+    m: *const model.Model,
+    e: *const model.Entry,
+    win: model.WindowId,
+    fs_win: ?model.WindowId,
+) bool {
+    if (e.presence != .present or e.anchor != .floating) return false;
+    if (!model.visibleEntry(m, e, m.current)) return false;
+    if (fs_win) |fs| return win != fs and model.isPinnedFloat(e.*);
+    return true;
 }
 
 /// Best known live geometry for `win` without a server round trip:
@@ -726,10 +751,12 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 }
 
 /// True when a `.present` entry's desire will be non-parked on the current
-/// workspace. Under a fullscreen covering winner everything parks regardless of
-/// anchor; a float must be on-workspace-visible; a tiled window needs a visible
-/// placement, or -- with none (multi-tag orphan) -- on-workspace visibility AND
-/// a kept last-sent rect. Shared by the winner seed and computeDesire.
+/// workspace. Under a fullscreen covering winner only a pinned floating
+/// window stays non-parked (it is deliberately shown above the cover); every
+/// other entry parks. A float must be on-workspace-visible; a tiled window
+/// needs a visible placement, or -- with none (multi-tag orphan) --
+/// on-workspace visibility AND a kept last-sent rect. Shared by the winner
+/// seed and computeDesire.
 fn desireIsNonParked(
     e: model.Entry,
     fs_win: ?model.WindowId,
@@ -737,7 +764,9 @@ fn desireIsNonParked(
     has_kept_rect: bool,
     on_current: bool,
 ) bool {
-    if (fs_win != null) return false;
+    if (fs_win != null) {
+        return model.isPinnedFloat(e) and on_current;
+    }
     switch (e.anchor) {
         .floating => return on_current,
         .tiled => return if (placement) |p| p.visible else (on_current and has_kept_rect),
@@ -783,7 +812,9 @@ fn computeDesire(
             }
         },
         // A covering window owns the screen: every other present window is a
-        // covered sibling and parks (geometry preserved for the exit replay).
+        // covered sibling and parks (geometry preserved for the exit replay),
+        // except a float pinned to every workspace (desireIsNonParked), which
+        // stays on screen above the cover.
         .present => {
             // Parked-ness comes from the shared predicate (desireIsNonParked).
             parked = !desireIsNonParked(e.*, fs_win, placement, last.has_rect, on_current);

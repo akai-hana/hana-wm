@@ -120,9 +120,7 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
 
         'x', 'X', 'D', 'C', 's' => execDirectSym(vs, @truncate(sym), cnt),
 
-        'p', 'P' => if (g.yank_len > 0) for (0..cnt) |_| {
-            if (sym == 'p' or sym == 'P') paste(vs, sym == 'p');
-        },
+        'p', 'P' => if (g.yank_len > 0) for (0..cnt) |_| paste(vs, sym == 'p'),
 
         '~' => for (0..cnt) |_| toggleCaseOnce(vs),
 
@@ -146,17 +144,12 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
 pub fn handleNormal(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     if (resolveMotionKey(vs, sym)) |res| {
         if (res.mr) |mr| {
-            if (res.op == 0) {
-                setCursor(vs, mr);
-                return .none;
-            }
-            applyOperator(vs, res.op, mr);
+            if (res.op == 0) setCursor(vs, mr) else applyOperator(vs, res.op, mr);
         }
         return .none;
     }
 
     if (sym == 'd' or sym == 'c' or sym == 'y') return handleOperatorArm(vs, sym);
-
     return execNormalKey(vs, sym, effectiveCount());
 }
 
@@ -360,9 +353,7 @@ fn execDirectSym(vs: *EditorState, sym: u8, cnt: u32) void {
 /// 1e6); consumers clamp against buffer bounds anyway, so saturate instead of
 /// overflowing.
 fn effectiveCount() u32 {
-    const p = g.prefix.count;
-    const o = g.prefix.op_count;
-    return (if (p == 0) 1 else p) *| (if (o == 0) 1 else o);
+    return @max(g.prefix.count, 1) *| @max(g.prefix.op_count, 1);
 }
 
 inline fn isWordChar(ch: u8) bool {
@@ -371,7 +362,8 @@ inline fn isWordChar(ch: u8) bool {
 
 /// Character class for word motions.  `big=true` collapses to space/non-space.
 inline fn charClass(big: bool, ch: u8) u2 {
-    return if (ch == ' ') 0 else @as(u2, @intFromBool(big or isWordChar(ch))) + 1;
+    if (ch == ' ') return 0;
+    return if (big or isWordChar(ch)) 2 else 1;
 }
 
 fn firstNonBlank(vs: *EditorState) usize {
@@ -387,10 +379,7 @@ fn wordScanFwd(comptime end: bool, vs: *EditorState, big: bool, cnt: u32) usize 
         if (comptime end) {
             p += 1;
             while (p < vs.len and vs.buf[p] == ' ') p += 1;
-            if (p >= vs.len) {
-                p = vs.len;
-                break;
-            }
+            if (p >= vs.len) break;
             const cls = charClass(big, vs.buf[p]);
             while (p + 1 < vs.len and charClass(big, vs.buf[p + 1]) == cls) p += 1;
         } else {

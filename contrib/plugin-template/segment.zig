@@ -21,7 +21,7 @@
 //! build.zig), so contract drift self-fails.
 //!
 //! The shared bar vocabulary (Frame, Env, DrawCtx, BarHandlers, title
-//! snapshot types) lives in src/bar/segment.zig — import it with
+//! snapshot types) lives in src/bar/engine/segment.zig — import it with
 //! `@import("segment")`. Note the names collide on purpose: the template
 //! also binds the NAME "segment" in the registry samples below. Mirror the
 //! shipped segments (clock.zig is the reference) rather than this template
@@ -52,7 +52,7 @@ var g_polls: u32 = 0;
 /// prompt (`*const segment.BarHandlers` — presentForPrompt/dismissAfterPrompt/
 /// isBarWindow). Cast it on this side; leave null-ignored when your
 /// segment needs no bar services.
-/// `conn` is `*const anyopaque`, not `core.Connection`: `bar_contract.zig` is
+/// `conn` is `*const anyopaque`, not `core.Connection`: `src/bar/core/contract.zig` is
 /// xcb-free so the segment hook can name no X type. Cast it back with
 /// `@ptrCast(@constCast(conn))` if you actually need the connection.
 pub fn init(allocator: std.mem.Allocator, conn: *const anyopaque, handlers: ?*const anyopaque) anyerror!void {

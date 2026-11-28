@@ -19,7 +19,7 @@ const query = @import("query");
 const contract = @import("bar_contract");
 const center_row = @import("center_row");
 const segmod = @import("segment");
-const window_facts = @import("window_facts");
+const title_cache = @import("title_cache");
 const window = @import("window");
 const state = @import("state");
 
@@ -51,15 +51,14 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
     // Titles/geoms come from the WM-owned title cache and the sync
     // truth-rect -- no X11 work, so the draw path is non-blocking.
     const entries = s.frame.entries[0..s.frame.entries_len];
-    var first_minimized = false;
-    for (entries, 0..) |*e, i| {
-        const is_minimized = s.title_data.minimized.contains(e.window);
-        e.title = window_facts.peekTitle(e.window);
-        e.geom = titleGeom(e.window, is_minimized);
-        if (i == 0) first_minimized = is_minimized;
+    for (entries) |*e| {
+        e.title = title_cache.peekTitle(e.window);
+        e.geom = titleGeom(e.window, s.title_data.minimized.contains(e.window));
     }
-    var minimized_title: []const u8 = "";
-    if (first_minimized) minimized_title = entries[0].title;
+    // Only the first entry's title seeds the title slot; minimized state is
+    // already in the set for every entry above.
+    const first_minimized = entries.len > 0 and s.title_data.minimized.contains(entries[0].window);
+    ctx.minimized_title = if (first_minimized) entries[0].title else "";
     ctx.focused_window = focus.getFocused();
     // Copy, do not borrow: `peekTitle` returns a slice of the cache's own
     // storage, and this ctx outlives the draw through `frame.last_ctx`.
@@ -69,13 +68,12 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
         const src = if (entries.len > 0 and entries[0].window == fw)
             entries[0].title
         else
-            window_facts.peekTitle(fw);
+            title_cache.peekTitle(fw);
         @memcpy(s.title_data.focused_title_buf[0..src.len], src);
         ctx.focused_title = s.title_data.focused_title_buf[0..src.len];
     } else {
         ctx.focused_title = "";
     }
-    ctx.minimized_title = minimized_title;
     ctx.current_ws_entries = entries;
     ctx.minimized_set = &s.title_data.minimized;
 }
@@ -509,11 +507,11 @@ fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, 
     // reports width 0 and skips the blit, rather than the bar inferring it.
     const drawn = drawSegment(s, &ctx, id, x, pinned_w);
     if (!drawn.drew) return;
-    const drawn_w: u16 = drawn.painted.width;
+    const blit_w = @max(bound_w, drawn.painted.width);
     if (flush_blit) {
-        s.render.dc.blitRegion(x, @max(bound_w, drawn_w));
+        s.render.dc.blitRegion(x, blit_w);
     } else {
-        s.render.dc.queueBlit(x, @max(bound_w, drawn_w));
+        s.render.dc.queueBlit(x, blit_w);
     }
     clearSegmentDirty(s, id);
 }
@@ -648,21 +646,12 @@ fn drawRowSegment(
     omit_gap: bool,
     scaled_spacing: u16,
 ) u16 {
-    const x_before = x;
     const drawn = drawSegment(s, ctx, id, x, w);
-    const painted = drawn.painted;
+    if (!drawn.drew) return x + w;
     // Segment says whether it painted (not bar guessing from "did x move?"); a
     // zero-width draw and a caught error both consume the reserved `w`.
-    const drew = drawn.drew;
-    if (drew and !omit_gap) paintGap(s, painted.end_x, scaled_spacing);
-    return if (drew)
-        painted.end_x + (if (omit_gap) 0 else scaled_spacing)
-    else
-        x_before + w;
-}
-
-fn paintGap(s: *State, gap_x: u16, scaled_spacing: u16) void {
-    clearRegion(s, gap_x, scaled_spacing);
+    if (!omit_gap) clearRegion(s, drawn.painted.end_x, scaled_spacing);
+    return drawn.painted.end_x + (if (omit_gap) 0 else scaled_spacing);
 }
 
 /// Solves the frame's row geometry and paints it through one `RowPlan`: solve
@@ -819,12 +808,7 @@ pub fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_fu
 
         if (!is_full_redraw) {
             // Left/center clear also covers the trailing gap it advances past.
-            const clear_w = if (slot.is_right)
-                slot.w
-            else if (slot.omit_gap)
-                slot.w
-            else
-                slot.w +| scaled_spacing;
+            const clear_w = if (slot.is_right or slot.omit_gap) slot.w else slot.w +| scaled_spacing;
             clearRegion(s, slot_x, clear_w);
         }
 
@@ -833,7 +817,7 @@ pub fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_fu
             // right_total, not a painted gap; a pending gap would clear twice.
             if (slot.right_layout_start) pending_gap = false;
             const drew = drawSegment(s, ctx, slot.id, slot.x, slot.w).drew;
-            if (drew and pending_gap) paintGap(s, slot.x +| slot.w, scaled_spacing);
+            if (drew and pending_gap) clearRegion(s, slot.x +| slot.w, scaled_spacing);
             // A failed draw still occupies its slot as empty space so the
             // next leftward segment gets the same gap solve computed.
             pending_gap = true;

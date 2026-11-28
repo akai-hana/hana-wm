@@ -5,9 +5,10 @@ file that file pulls in with `include`. There is no schema duty: every file
 is parsed with hana's own TOML parser, so malformed values are either
 warned-and-ignored or rejected while keeping the previous config in memory.
 
-Sections follow the build: each optional subsystem ships a `*_config.zig`
-fragment next to its code, and the binary only parses the sections owned by
-the fragments it was compiled with. A `[tiling]` key in a bar-only build (or
+Sections follow the build: each optional subsystem ships a config fragment in
+its `core/` tier (`src/<system>/core/config.zig`, registered as
+`<system>_config`), and the binary only parses the sections owned by the
+fragments it was compiled with. A `[tiling]` key in a bar-only build (or
 any section whose owning subsystem was deleted from the tree) is simply
 unrecognized: warned about like any unknown section and ignored. The
 embedded fallback config is pre-filtered the same way, so a minimal build
@@ -136,6 +137,10 @@ No keys: the fullscreen feature's presence is decided at build time
 
 `count`: number of workspaces, 1-64. Also accepted under the alias
 section `[bar.modules.workspaces]`.
+
+`pinning`: allow pinning windows to every workspace (`pin_window`, and EWMH
+all-desktops requests). Defaults to `true`; when `false`, new pin requests are
+ignored and windows already pinned keep their state until unpinned.
 
 ### `[bar]`
 

@@ -120,6 +120,22 @@ test "fullscreen-absent build never resolves the current-workspace fallback" {
     try std.testing.expect(!behind(&m, 30, ws0, false));
 }
 
+test "a float pinned to every workspace stays above the cover and keeps its color" {
+    var m = try modelWithTiled(ws0);
+    try window_state_ops.register(&m, 40, ws0);
+    setCovering(&m, 40, ws0);
+
+    // Pinned floats are the one exception to the behind-the-cover rule: the
+    // reconciler keeps them above the covering winner, so they are not hidden.
+    try helpers.addFloating(&m, 50, .{ .x = 10, .y = 10, .width = 200, .height = 150 });
+    m.store.getPtr(50).?.mask = model.ALL_MASK;
+    try std.testing.expect(!behind(&m, 50, ws0, true));
+
+    // An unpinned float on the same workspace is still behind the cover.
+    try helpers.addFloating(&m, 51, .{ .x = 20, .y = 20, .width = 200, .height = 150 });
+    try std.testing.expect(behind(&m, 51, ws0, true));
+}
+
 // The pure cores of the two live reads borders_test covers. The item asked
 // for the borders_test assertions to move here headless; taken literally that
 // is impossible, because `core.borderWidth()` and

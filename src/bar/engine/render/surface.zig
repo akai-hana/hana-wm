@@ -56,7 +56,6 @@ pub const compositor_probe_max_ms: i32 = 1000;
 
 /// Doubles the compositor-probe interval, saturating at the cap.
 pub fn nextCompositorProbeMs(current: i32) i32 {
-    if (current >= compositor_probe_max_ms) return compositor_probe_max_ms;
     return @min(current *| 2, compositor_probe_max_ms);
 }
 
@@ -175,13 +174,11 @@ pub const Surface = struct {
         errdefer _ = core.xcb.xcb_free_gc(conn, copy_gc);
         const gc_cookie = core.xcb.xcb_create_gc_checked(conn, gc, pixmap, 0, null);
         const copy_gc_cookie = core.xcb.xcb_create_gc_checked(conn, copy_gc, window, 0, null);
-        if (core.xcb.xcb_request_check(conn, gc_cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
-        }
-        if (core.xcb.xcb_request_check(conn, copy_gc_cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
+        for ([_]core.xcb.xcb_void_cookie_t{ gc_cookie, copy_gc_cookie }) |cookie| {
+            if (core.xcb.xcb_request_check(conn, cookie)) |err| {
+                std.c.free(err);
+                return error.GCCreationFailed;
+            }
         }
 
         const composited = is_argb and compositorActive(conn);
@@ -290,8 +287,7 @@ pub const Surface = struct {
     pub fn compositorProbeTimeoutMs(self: *const Surface) ?i32 {
         if (!self.is_argb or self.composited) return null;
         const remaining = self.compositor_probe_at_ms - core.monotonicMs();
-        if (remaining <= 0) return 0;
-        return @intCast(@min(remaining, std.math.maxInt(i32)));
+        return @intCast(std.math.clamp(remaining, 0, std.math.maxInt(i32)));
     }
 
     /// Probes the selection when the retry deadline has arrived. Returns true

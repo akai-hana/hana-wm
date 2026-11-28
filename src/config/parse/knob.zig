@@ -131,22 +131,14 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
         var cur = root;
         var it = std.mem.splitScalar(u8, path, '.');
         while (it.next()) |seg| {
-            const fields = @typeInfo(cur).@"struct".fields;
-            var next: ?type = null;
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, seg)) {
-                    next = f.type;
-                    break;
-                }
-            }
-            const t = next orelse return null;
+            const idx = std.meta.fieldIndex(cur, seg) orelse return null;
+            const t = std.meta.fields(cur)[idx].type;
             // Last segment is the answer even when its type is a struct
             // (ScalableValue IS one); treating it as a waypoint would make
             // every size knob look like a dangling path.
             if (it.peek() == null) return t;
-            if (@typeInfo(t) == .@"struct" and t != f64) {
-                cur = t;
-            } else return null;
+            if (@typeInfo(t) != .@"struct" or t == f64) return null;
+            cur = t;
         }
         return null;
     }
@@ -347,8 +339,8 @@ fn getInRange(
     section: *parser.Section,
     key: []const u8,
     default: T,
-    comptime min: ?T,
-    comptime max: ?T,
+    comptime min: ?comptime_int,
+    comptime max: ?comptime_int,
 ) T {
     comptime {
         switch (@typeInfo(T)) {
@@ -476,23 +468,22 @@ pub fn applyAll(
         if (comptime k.requires.len > 0) {
             if (doc.getSection(k.requires) == null) break :knob;
         }
-        var hit: ?struct { sec: *parser.Section, key: []const u8 } = null;
-        for (k.places) |pl| {
+        const hit: ?struct { sec: *parser.Section, key: []const u8 } = blk: {
             // First section present wins; only its paired key spelling is read
             // (presence of `[tiling.layouts.master-stack]` makes flat
             // `[tiling]` master_count unrecognized).
-            if (doc.getSection(pl.section)) |sec| {
-                hit = .{ .sec = sec, .key = pl.key };
-                break;
+            for (k.places) |pl| {
+                if (doc.getSection(pl.section)) |sec| break :blk .{ .sec = sec, .key = pl.key };
             }
-        }
+            break :blk null;
+        };
         const p = walkPtr(CfgT, cfg, k.target);
         switch (k.kind) {
             .b => if (hit) |h| {
                 if (h.sec.getAsOrWarn(bool, h.key)) |v| p.* = v;
             },
             .int => |spec| if (hit) |h| {
-                p.* = getInRange(spec.T, h.sec, h.key, p.*, if (spec.min) |m| @as(spec.T, m) else null, if (spec.max) |m| @as(spec.T, m) else null);
+                p.* = getInRange(spec.T, h.sec, h.key, p.*, spec.min, spec.max);
             },
             .scalable => |min| if (hit) |h| {
                 if (getScalableInRange(h.sec, h.key, p.*, min, "default")) |v| p.* = v;
@@ -685,14 +676,12 @@ fn typeLabel(comptime kind: Kind) []const u8 {
 /// has no local bound (the policy lives in validate() instead).
 fn rangeOf(comptime kind: Kind) []const u8 {
     return switch (kind) {
-        .int => |i| if (i.min != null and i.max != null)
-            std.fmt.comptimePrint("{d}..{d}", .{ i.min.?, i.max.? })
-        else if (i.min != null)
-            std.fmt.comptimePrint("{d}..", .{i.min.?})
-        else if (i.max != null)
-            std.fmt.comptimePrint("..{d}", .{i.max.?})
-        else
-            "",
+        .int => |i| blk: {
+            if (i.min == null and i.max == null) break :blk "";
+            const lo = if (i.min) |m| std.fmt.comptimePrint("{d}", .{m}) else "";
+            const hi = if (i.max) |m| std.fmt.comptimePrint("{d}", .{m}) else "";
+            break :blk lo ++ ".." ++ hi;
+        },
         .opt_float => |f| std.fmt.comptimePrint("{d}..{d}", .{ f.min, f.max }),
         .ratio, .ratio_strict => "0..1",
         else => "",

@@ -203,6 +203,8 @@ Don't want hana's bar? Remove the bar sub-system and recompile. Don't want tilin
 
 The directory tree is load-bearing, too. Optional extensions live beside their peers (layouts beside the tiling engine, widgets beside the bar, window addons beside the window layer), and discovery is path-prefixed: layouts are only picked up under `src/tiling/modules/`, bar segments under `src/bar/modules/`, and window addons under `src/window/modules/`. Within those homes, file names become registry stems. A `foo.zig` in the right `modules/` directory that declares the owner's module binding joins that owner's registry; move it somewhere else and it stops being discovered. That's what gives the tree a clear reading order (what is mandatory, what is optional, what each addition hangs onto), and it means deleting a sub-system's directory takes its whole family of extensions with it.
 
+Each sub-system reads in three tiers. The eponymous file at its root (e.g. `src/bar/bar.zig`) is the facade. `core/` is the sub-system's surface — its contract and config fragment — and is a naming scope: `src/bar/core/config.zig` registers as `bar_config`, so those files carry role-only names while the flat import namespace stays stable. `engine/` holds the implementation internals. Only `modules/` is discovered as drop-in extensions.
+
 Two habits keep the whole thing honest:
 
 1. **The core never names the optional.** It speaks only through small contract interfaces (one family for window extensions, one for the bar, one shared by every tiling layout), and at build time a registry is generated from whatever files are actually in the tree. Deleting a file removes the only reference to it: no feature flag, no dead branch, no commented-out wiring left to clean up.

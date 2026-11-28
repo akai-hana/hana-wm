@@ -33,6 +33,9 @@ fn lessStrings(_: void, a: []const u8, b_: []const u8) bool {
 // "src/config/" prefix tests.
 const source_root = "src";
 const entry_point_path = source_root ++ "/main.zig";
+// Directories directly under `source_root` that are not deletable systems, so
+// the `core/` naming scope must not prefix their module names.
+const non_system_dirs = [_][]const u8{ "core", "test" };
 const fallback_toml_path = "config/fallback.toml";
 // Cap on the fallback-config read; it is configuration, not data.
 const max_fallback_toml_bytes = 1024 * 1024;
@@ -199,10 +202,10 @@ pub fn build(b: *std.Build) !void {
                     const rest = rel["src/bar/modules/".len..];
                     const slash = std.mem.indexOfScalar(u8, rest, '/');
                     if (slash != null) dir = std.fs.path.dirname(rel).?;
-                } else if (std.mem.startsWith(u8, rel, "src/bar/render/")) {
-                    dir = "src/bar/render";
-                } else if (std.mem.startsWith(u8, rel, "src/bar/wire/")) {
-                    dir = "src/bar/wire";
+                } else if (std.mem.startsWith(u8, rel, "src/bar/engine/render/")) {
+                    dir = "src/bar/engine/render";
+                } else if (std.mem.startsWith(u8, rel, "src/bar/engine/wire/")) {
+                    dir = "src/bar/engine/wire";
                 }
                 if (dir) |d| {
                     const gop = try dir_seen.getOrPut(b.allocator, d);
@@ -3202,13 +3205,48 @@ const Module = struct {
             }
         }
 
+        /// The module name a discovered file is registered under.
+        ///
+        /// `src/<system>/core/<name>.zig` is a NAMING SCOPE: the on-disk file
+        /// omits the system prefix, and the build re-materializes it for the
+        /// flat module namespace (`src/bar/core/config.zig` -> `bar_config`).
+        /// The global import table therefore stays stable while `core/` files
+        /// carry role-only names. A `core/` file must not repeat the prefix;
+        /// `<name> == <system>` maps to the bare system name.
+        fn moduleNameFor(ctx: *DiscoveryContext, rel_path: []const u8) ![]const u8 {
+            const b = ctx.b;
+            const stem = std.fs.path.stem(std.fs.path.basename(rel_path));
+            const dir = std.fs.path.dirname(rel_path) orelse return stem;
+            if (!std.mem.eql(u8, std.fs.path.basename(dir), "core")) return stem;
+            const system_dir = std.fs.path.dirname(dir) orelse return stem;
+            if (!std.mem.eql(u8, std.fs.path.dirname(system_dir) orelse "", source_root)) return stem;
+            const system = std.fs.path.basename(system_dir);
+            if (system.len == 0) return stem;
+            // Not systems: `src/core/` is the mandatory layer itself and
+            // `src/test/` mirrors it, so `src/test/core/foo.zig` is a test
+            // named `foo`, not `test_foo`.
+            for (non_system_dirs) |dir_name| {
+                if (std.mem.eql(u8, system, dir_name)) return stem;
+            }
+            if (std.mem.eql(u8, stem, system)) return stem;
+            const prefix = try std.fmt.allocPrint(b.allocator, "{s}_", .{system});
+            if (std.mem.startsWith(u8, stem, prefix)) {
+                std.debug.print(
+                    "Error: core/ file '{s}' repeats its system prefix ('{s}'); name it '{s}.zig' instead.\n",
+                    .{ rel_path, prefix, stem[prefix.len..] },
+                );
+                return error.RedundantCorePrefix;
+            }
+            return std.fmt.allocPrint(b.allocator, "{s}_{s}", .{ system, stem });
+        }
+
         /// Registers a new module.
         ///
         /// Rejects reserved names (see `reserved_module_names`) and handles
         /// collisions between discovered modules if found.
         fn registerModule(ctx: *DiscoveryContext, rel_path: []const u8) !void {
             const b = ctx.b;
-            const stem = std.fs.path.stem(std.fs.path.basename(rel_path));
+            const stem = try ctx.moduleNameFor(rel_path);
 
             for (reserved_module_names) |reserved| {
                 if (std.mem.eql(u8, stem, reserved)) {

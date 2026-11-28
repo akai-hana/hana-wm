@@ -621,15 +621,15 @@ run_scenarios() {
 
     run_scenario_check \
         "bar internal: -drawing" \
-        "src/bar/render/drawing.zig"
+        "src/bar/engine/render/drawing.zig"
 
     run_scenario_check \
         "bar internal: -win" \
-        "src/bar/wire/win.zig"
+        "src/bar/engine/wire/win.zig"
 
     run_scenario_check \
         "bar internal: -segment dispatch" \
-        "src/bar/segment.zig"
+        "src/bar/engine/segment.zig"
 
     # Tier 6: negative case. Leaving a `*_config` fragment behind its owner is
     # NOT modular -- the build must refuse it, so this scenario inverts the

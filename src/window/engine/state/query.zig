@@ -119,6 +119,17 @@ pub fn isTiledMode(win: u32) bool {
     return e.anchor == .tiled;
 }
 
+/// True when the reconciler owns `win`'s stacking: a tiled anchor, or a
+/// covering (fullscreen) presence. A focus raise must not compete with the
+/// reconcile's winner/float-re-assert pass -- otherwise a floating fullscreen
+/// window, or a click on a covering one, would rise above the pinned-float
+/// layer.
+pub fn stackingOwnedByReconcile(win: u32) bool {
+    const mm = m() orelse return false;
+    const e = mm.store.get(win) orelse return false;
+    return e.anchor == .tiled or e.presence == .covering;
+}
+
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
     if (getCurrentWorkspace()) |cur| {
         const mm = m() orelse return false;

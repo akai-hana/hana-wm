@@ -33,7 +33,7 @@ pub const BarHandlers = struct {
 };
 
 /// The bar's per-frame workspace facts, collected fresh by bar.zig every draw --
-/// the only segment-visible slice of WM state. Defined in bar_contract.zig so
+/// the only segment-visible slice of WM state. Defined in `src/bar/core/contract.zig` so
 /// `naturalWidth` can take `*const Frame`; this alias keeps the reader-facing name.
 pub const Frame = contract.Frame;
 

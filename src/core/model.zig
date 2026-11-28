@@ -492,6 +492,13 @@ pub inline fn isPinned(e: Entry) bool {
     return e.mask == ALL_MASK;
 }
 
+/// Whether `e` is a floating window pinned to every workspace: the one shape
+/// that stays on screen above a fullscreen covering winner (the reconciler
+/// keeps it mapped and re-asserts it above the cover).
+pub inline fn isPinnedFloat(e: Entry) bool {
+    return e.anchor == .floating and isPinned(e);
+}
+
 /// Whether `e` is tagged on `ws`: the tag-membership test behind the
 /// visible/tiled-count predicates, re-exported via `maskedOn` for facades
 /// holding only a raw mask.

@@ -226,6 +226,104 @@ test "toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
 }
 
+// A pinned float fullscreened over an existing cover takes the screen
+// TEMPORARILY: exiting its fullscreen restores the displaced cover instead of
+// leaving the underlying window as an ordinary floating/tiled window.
+test "pinned float temporary fullscreen restores suspended cover" {
+    var m = makeModel();
+
+    regCur(&m, 100);
+    const r: model.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    try addFloating(&m, 101, r);
+    m.store.getPtr(101).?.mask = model.ALL_MASK; // Mod+Shift+5
+
+    _ = fullscreen.toggleFullscreen(&m, 100);
+    try testing.expect(m.store.get(100).?.presence == .covering);
+
+    // The pinned float covers over the tiled cover, which yields.
+    _ = fullscreen.toggleFullscreen(&m, 101);
+    try testing.expect(m.store.get(101).?.presence == .covering);
+    try testing.expect(m.store.get(100).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 100));
+    try testing.expectEqual(
+        @as(?WindowId, 101),
+        model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible),
+    );
+
+    // Exiting the float restores the displaced cover, intent and all.
+    _ = fullscreen.toggleFullscreen(&m, 101);
+    try testing.expect(m.store.get(101).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 101));
+    try testing.expect(m.store.get(100).?.presence == .covering);
+    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 100));
+    try testing.expectEqual(
+        @as(?WindowId, 100),
+        model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible),
+    );
+}
+
+// The temporary-takeover restore is specific to a PINNED float: an ordinary
+// float switching fullscreen over a cover is a permanent switch, exactly as
+// before.
+test "non-pinned float fullscreen switch does not restore previous cover" {
+    var m = makeModel();
+
+    regCur(&m, 110);
+    try addFloating(&m, 111, .{ .x = 10, .y = 20, .width = 300, .height = 200 });
+
+    _ = fullscreen.toggleFullscreen(&m, 110);
+    _ = fullscreen.toggleFullscreen(&m, 111); // switch: 110 yields for good
+    try testing.expect(m.store.get(110).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 110));
+
+    _ = fullscreen.toggleFullscreen(&m, 111); // exit: nothing suspended
+    try testing.expect(m.store.get(111).?.presence == .present);
+    try testing.expect(m.store.get(110).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 110));
+}
+
+// Another window claiming the screen while the pinned float holds it drops
+// the pending restore: the suspended window must not pop back over the new
+// cover when the float exits.
+test "suspended cover is not restored after another window takes the screen" {
+    var m = makeModel();
+
+    regCur(&m, 120);
+    regCur(&m, 121);
+    try addFloating(&m, 122, .{ .x = 10, .y = 20, .width = 300, .height = 200 });
+    m.store.getPtr(122).?.mask = model.ALL_MASK;
+
+    _ = fullscreen.toggleFullscreen(&m, 120);
+    _ = fullscreen.toggleFullscreen(&m, 122); // suspend 120
+    _ = fullscreen.toggleFullscreen(&m, 121); // switch: 122 yields, restore forgotten
+    try testing.expect(m.store.get(122).?.presence == .present);
+    try testing.expect(m.store.get(120).?.presence == .present);
+
+    _ = fullscreen.toggleFullscreen(&m, 121); // exit: nothing to restore
+    try testing.expect(m.store.get(121).?.presence == .present);
+    try testing.expect(m.store.get(120).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 120));
+}
+
+// The suspension is bound to the workspace the float took over. Leaving that
+// workspace and exiting the float's fullscreen must not resurrect the cover
+// somewhere else.
+test "suspended cover is not restored after a workspace switch" {
+    var m = makeModel();
+
+    regCur(&m, 130);
+    try addFloating(&m, 131, .{ .x = 10, .y = 20, .width = 300, .height = 200 });
+    m.store.getPtr(131).?.mask = model.ALL_MASK;
+
+    _ = fullscreen.toggleFullscreen(&m, 130);
+    _ = fullscreen.toggleFullscreen(&m, 131); // suspend 130 on workspace 0
+    m.current = WSId.fromIndex(1);
+    _ = fullscreen.toggleFullscreen(&m, 131); // exit from workspace 1
+    try testing.expect(m.store.get(131).?.presence == .present);
+    try testing.expect(m.store.get(130).?.presence == .present);
+    try testing.expect(!model.isCovering(&m, 130));
+}
+
 // The module occupant hook delegates to the model scan and agrees with it on
 // the parked-ghost exclusion.
 test "coveringOccupantOn excludes parked ghosts" {

@@ -3,6 +3,11 @@
 //! advertises `_NET_WM_STATE_FULLSCREEN` via EWMH, and coordinates deferred
 //! bar hide/show on ConfigureNotify. A minimized covering window stays a
 //! ghost (retains `covering_ws`) so restore reclaims the screen.
+//!
+//! A pinned float fullscreened over an existing cover is a TEMPORARY
+//! takeover: the displaced cover's intent is held in one module-local
+//! `Suspended` record and restored when the float leaves fullscreen, so the
+//! underlying window does not silently lose its fullscreen status.
 
 const std = @import("std");
 const core = @import("core");
@@ -91,6 +96,18 @@ pub const PendingBarTable = struct {
 
 var g_pending_bars: PendingBarTable = .{};
 
+/// A covering window displaced by a pinned float's temporary fullscreen.
+/// `by` is the pinned float holding the screen; `ws` is the workspace it
+/// took over. One record is enough: at most one cover is displaced at a
+/// time, and a second takeover overwrites the first (unwinding is one level).
+const Suspended = struct {
+    win: model.WindowId,
+    by: model.WindowId,
+    ws: model.WSId,
+};
+
+var g_suspended: ?Suspended = null;
+
 // EWMH atoms resolved from the shared atom cache in init(). Zero when the
 // cache was unavailable; setEwmhFullscreenState's guard skips the write then.
 var g_net_wm_state: xcb.xcb_atom_t = 0;
@@ -98,8 +115,17 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 fn resetState() void {
     g_pending_bars.clear();
+    g_suspended = null;
     g_net_wm_state = 0;
     g_net_wm_state_fullscreen = 0;
+}
+
+/// Forget a pending restore when either side of it leaves the model or
+/// loses its covering intent: there is nothing left to reclaim.
+fn forgetSuspended(win: model.WindowId) void {
+    if (g_suspended) |s| {
+        if (s.win == win or s.by == win) g_suspended = null;
+    }
 }
 
 pub fn init() anyerror!void {
@@ -131,8 +157,13 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (e.covering_ws != null) {
         // OFF: clearing the core intent replays the unchanged anchor and
-        // drops the covering presence.
+        // drops the covering presence. Capture the pending restore first:
+        // releaseCovering forgets it (the exiting window is its `by`).
+        const suspended = g_suspended;
         releaseCovering(m, win);
+        if (suspended) |s| {
+            if (s.by == win) restoreSuspended(m, s);
+        }
         return true;
     }
     // Covering SWITCH: a resident occupant yields first (store-order scan).
@@ -142,12 +173,40 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
         if (model.coveringOccupantOn(m, m.current, .anchored_or_visible)) |occupant| {
-            if (occupant != win) releaseCovering(m, occupant);
+            if (occupant != win) {
+                // Only a pinned float's takeover is temporary: it stays
+                // visible above the cover by design, so the displaced
+                // cover must come back when the float exits fullscreen.
+                const suspends = model.isPinnedFloat(e.*);
+                releaseCovering(m, occupant);
+                if (suspends) {
+                    // AFTER the release: releaseCovering forgets records
+                    // naming `occupant`, which would clear this one.
+                    g_suspended = .{ .win = occupant, .by = win, .ws = m.current };
+                }
+            }
         }
     }
     e.presence = .covering;
     e.covering_ws = m.current; // model stays the authority on the capture target
     return true;
+}
+
+/// Re-claims `s.ws` for a cover displaced by a pinned float's temporary
+/// fullscreen. Every premise the suspension relied on is re-checked, so a
+/// workspace switch, teardown, retag, or a second cover in the meantime
+/// cannot resurrect a stale fullscreen.
+fn restoreSuspended(m: *model.Model, s: Suspended) void {
+    if (!s.ws.eql(m.current)) return;
+    const target = m.store.getPtr(s.win) orelse return;
+    // Covers visibility (parked ghosts included) on the captured workspace.
+    if (!model.visibleOn(m, s.win, s.ws)) return;
+    // Another window may have claimed the screen while the float held it.
+    if (model.coveringOccupantOn(m, s.ws, .anchored_or_visible)) |other| {
+        if (other != s.win) return;
+    }
+    target.presence = .covering;
+    target.covering_ws = s.ws;
 }
 
 /// Clears `win`'s covering intent and presence (no-op if not covering). The
@@ -159,6 +218,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
 /// window IS covering, and a demote must not turn into a fullscreen entry if
 /// that proof is ever lost.
 pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
+    forgetSuspended(win);
     const e = m.store.getPtr(win) orelse return;
     // Preserve a parked ghost's presence: minimize's record table still
     // claims a minimized covering window, so a `.present` ghost would be
@@ -273,6 +333,8 @@ pub fn resolvePendingBarNow(win: u32) void {
 /// the store entry); clears any pending deferred bar op so the bar cannot
 /// stay stuck.
 pub fn onWindowGone(win: u32) void {
+    // A suspended cover can never be reclaimed once either side is gone.
+    forgetSuspended(win);
     const pending = g_pending_bars.take(win) orelse return;
     // A pending HIDE dies with the window; a pending SHOW must still bump
     // -- the bar has to be re-derived and the covering scan now comes back
@@ -283,9 +345,10 @@ pub fn onWindowGone(win: u32) void {
 /// Covering commands: the enter/exit/switch transition in ONE model
 /// transition + ONE reconcile. The covering winner renders edge-to-edge
 /// (screen rect, bw=0, pixel=0, ABOVE merged); everyone else parks
-/// off-screen in the same transition. Floating exit replays from the base
-/// rect via the LastSent diff; tiled exit re-derives from the tiling engine,
-/// collapsing the pre-exit "restore then re-park" round.
+/// off-screen except a float pinned to every workspace, which stays above
+/// the cover. Floating exit replays from the base rect via the LastSent diff;
+/// tiled exit re-derives from the tiling engine, collapsing the pre-exit
+/// "restore then re-park" round.
 ///
 /// Classification for the atomic grab path: a named kind instead of a
 /// bool-pair so enter/exit/switch_ can't be passed inconsistently.
@@ -327,6 +390,11 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     // binds toggleCovering unconditionally (single-binder), so the registry
     // lookup only ever re-found this file's own fn.
     if (!toggleFullscreen(m, win)) return;
+
+    // Screen owner AFTER the toggle. An exit can restore a cover suspended by
+    // a pinned float's temporary fullscreen, so `prev_fs_win` is no longer the
+    // answer for EWMH advertisement or the bar's occupancy read.
+    const cover_after = model.coveringOccupantOn(m, m.current, .anchored_or_visible);
 
     // Leaving fullscreen reflows the workspace: siblings parked off-screen
     // move back under a stationary pointer, and the synthetic crossings that
@@ -370,6 +438,14 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
                     if (prev_fs_win) |old| hook(old, false);
                 }
                 hook(win, kind != .exit);
+                // An exit that restored a suspended cover must re-advertise
+                // that cover: its fullscreen state was cleared when the
+                // pinned float switched in over it.
+                if (kind == .exit) {
+                    if (cover_after) |restored| {
+                        if (restored != win) hook(restored, true);
+                    }
+                }
             }
         }
         // Bar hide/show inside the grab, no separate grab/reconcile cycle.
@@ -382,17 +458,19 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
             surfaces.hideBarForFullscreen();
         } else {
             // Exit: deferred bar show, keyed to the window whose
-            // ConfigureNotify confirms the transition.
+            // ConfigureNotify confirms the transition. When the exit RESTORED
+            // a suspended cover the bump below re-derives the bar as hidden
+            // (that cover now owns the screen), so the arm is resolved without
+            // ever publishing a visible bar.
             registry.dispatchAll(.armPendingBarShow, .{win});
         }
     }
 
-    // Deterministic exit reaction: the model loses its covering occupant the
-    // moment the toggle lands, so bump the fact now. The deferred show alone
-    // is not enough -- it waits for a non-fullscreen ConfigureNotify, which
-    // never arrives when the restored anchor IS the screen size. Resolving
-    // the arm here keeps this bump the ONLY one (no second answer republishing
-    // an identical bar).
+    // Deterministic exit reaction: recompute the screen-owner fact the moment
+    // the toggle lands, so bump now. The deferred show alone is not enough --
+    // it waits for a non-fullscreen ConfigureNotify, which never arrives when
+    // the restored anchor IS the screen size. Resolving the arm here keeps
+    // this bump the ONLY one (no second answer republishing an identical bar).
     if (kind == .exit) {
         registry.dispatchAll(.resolvePendingBarNow, .{win});
         core.fullscreen.bump();

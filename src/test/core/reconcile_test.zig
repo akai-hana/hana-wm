@@ -228,6 +228,60 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     try fx.rec.expectGeomRect(3, 502, golden.stack, null);
 }
 
+test "fullscreen enter: pinned float stays visible above the cover; unpinned floats park" {
+    if (!build_options.has_fullscreen) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    helpers.regCur(&fx.m, 701);
+    const pinned_rect: model.Rect = .{ .x = 40, .y = 30, .width = 320, .height = 240 };
+    try helpers.addFloating(&fx.m, 702, pinned_rect);
+    // Mod+Shift+5 (pin_window) marks the float for every workspace.
+    fx.m.store.getPtr(702).?.mask = model.ALL_MASK;
+    try helpers.addFloating(&fx.m, 703, .{ .x = 100, .y = 120, .width = 260, .height = 180 });
+    focus.setFocus(&fx.m, 701);
+    fx.reconcile(.{}); // baseline: 701 tiled, both floats visible
+
+    _ = fullscreen.toggleFullscreen(&fx.m, 701);
+    fx.rec.clear();
+    fx.reconcile(.{ .force_restack = true });
+
+    // 701 takes the screen. 703 is an ordinary float on this workspace, so it
+    // parks. 702 is pinned: it keeps its rect and the re-assert replays it
+    // above the covering winner, so "all workspaces" really means on screen.
+    try fx.rec.expectLen(4);
+    try fx.rec.expectPixel(0, 701, 0);
+    try fx.rec.expectGeomBw(1, 701, golden.fullscreen, 0, .above);
+    try fx.rec.expectPark(2, 703);
+    try fx.rec.expectStackOnly(3, 702, .above);
+}
+
+test "fullscreen enter: a floating cover is re-raised under the pinned float, not over it" {
+    if (!build_options.has_fullscreen) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    const cover_rect: model.Rect = .{ .x = 60, .y = 50, .width = 400, .height = 300 };
+    try helpers.addFloating(&fx.m, 711, cover_rect);
+    try helpers.addFloating(&fx.m, 712, .{ .x = 240, .y = 200, .width = 260, .height = 180 });
+    fx.m.store.getPtr(712).?.mask = model.ALL_MASK;
+    focus.setFocus(&fx.m, 712);
+    fx.reconcile(.{}); // baseline: both floats visible
+
+    // A FLOATING cover takes the screen: its raise arms the float re-assert
+    // just like a tiled one, so the pinned float still ends up on top.
+    _ = fullscreen.toggleFullscreen(&fx.m, 711);
+    fx.rec.clear();
+    fx.reconcile(.{ .force_restack = true });
+
+    try fx.rec.expectLen(3);
+    try fx.rec.expectPixel(0, 711, 0);
+    try fx.rec.expectGeomBw(1, 711, golden.fullscreen, 0, .above);
+    try fx.rec.expectStackOnly(2, 712, .above);
+}
+
 // Park / unpark
 
 test "minimize parks every pass; restore replays original slot geometry" {

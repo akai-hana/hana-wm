@@ -197,8 +197,17 @@ pub fn setDesktop(win: model.WindowId, target: ?u8) void {
     }
 
     if (model.isPinned(e.*)) return;
+    // EWMH all-desktops is a pin request: the config gate applies here too.
+    if (!pinningEnabled()) return;
     e.mask = model.ALL_MASK;
     reconcile_tails.retile(.{}, null);
+}
+
+/// Whether the live config allows pinning a window to every workspace.
+/// Command and EWMH entry points consult this; the pure model transitions
+/// (`pinToggle`) stay config-free so they remain directly testable.
+fn pinningEnabled() bool {
+    return core.getState().config.workspaces.pinning;
 }
 
 /// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag
@@ -246,6 +255,7 @@ pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
 
 /// move_to_all_workspaces / toggle_tag_all: pinned <-> current-only.
 pub fn pinWindow(win: model.WindowId) void {
+    if (!pinningEnabled()) return;
     const wm = wsf.providerOf(.togglePin) orelse {
         log.warn("pin_window: no togglePin provider bound", .{});
         return;

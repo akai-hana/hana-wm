@@ -330,5 +330,14 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expect(op == .park);
             try std.testing.expectEqual(win, op.park);
         }
+
+        /// Asserts op `i` is a stack-only request (the float re-assert).
+        pub fn expectStackOnly(self: *const Self, i: usize, win: model.WindowId, s: sinkmod.Stack) !void {
+            comptime if (mode != .record) @compileError("expectStackOnly requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .stack);
+            try std.testing.expectEqual(win, op.stack.win);
+            try std.testing.expectEqual(s, op.stack.s);
+        }
     };
 }

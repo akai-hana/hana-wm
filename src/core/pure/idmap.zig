@@ -5,7 +5,7 @@
 const std = @import("std");
 
 /// Upper bound on live cache entries (focus-property cache in focus.zig,
-/// border/hints/title cache in window_facts.zig). Beyond the ceiling windows
+/// border/hints/title cache in title_cache.zig). Beyond the ceiling windows
 /// still work, they fall through to the live X11 path. Lives here because both
 /// caches are `IdMap` instantiations.
 pub const max_window_cache: usize = 512;

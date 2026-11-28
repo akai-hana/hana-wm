@@ -454,6 +454,11 @@ fn sizeEnvelope(hints: model.SizeHints, bw2: i32, min_dim: i32) HintLimits {
     };
 }
 
+/// Outer (border-inclusive) size clamp shared by the configure-request path.
+fn clampOuter(v: u16, min: i32, max: i32) u16 {
+    return @intCast(std.math.clamp(@as(i32, v), min, @max(min, max)));
+}
+
 /// `sizeEnvelope` for the live-core drag path (border width and global
 /// minimum always available there).
 fn sizeHintLimits(win: u32) HintLimits {
@@ -463,13 +468,7 @@ fn sizeHintLimits(win: u32) HintLimits {
     else
         types.default_min_window_dim;
     // Window may withdraw mid-drag; treat it as hint-less (no constraint).
-    const hints = (pipeline.state().store.get(win) orelse return .{
-        .min_w = min_dim,
-        .min_h = min_dim,
-        .max_w = @as(i32, std.math.maxInt(u16)),
-        .max_h = @as(i32, std.math.maxInt(u16)),
-        .hints = .{},
-    }).size_hints;
+    const hints: model.SizeHints = if (pipeline.state().store.get(win)) |e| e.size_hints else .{};
     return sizeEnvelope(hints, bw2, min_dim);
 }
 
@@ -573,6 +572,14 @@ fn commitPeriodNs(rate: f64) u64 {
     return @max(@as(u64, @intFromFloat(@ceil(p))), min_period_ns);
 }
 
+/// True when `r` differs from the last rect pushed to X this drag; an equal
+/// pending rect is a sub-pixel jiggle and is dropped (a re-send only costs a
+/// pointless client repaint).
+fn rectChanged(drag: *const DragState, r: model.Rect) bool {
+    const last = drag.last_committed orelse return true;
+    return !std.meta.eql(last, r);
+}
+
 /// One throttled commit of a tiled edge-drag: map total pixel displacement
 /// to knob units, then apply the gap between the DESIRED value (snapshot +
 /// mapped delta) and the LIVE model value. Re-reading the live value every
@@ -656,16 +663,12 @@ pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     const now = core.monotonicNs();
     const period_ns: u64 = commitPeriodNs(rate);
     if (now - drag.last_commit_ns >= period_ns) {
-        if (drag.pending_rect) |r| {
-            // Drop same-size commits (sub-pixel jiggle = pointless repaint).
-            const same = if (drag.last_committed) |last| std.meta.eql(last, r) else false;
-            if (!same) {
-                drag.last_commit_ns = now;
-                drag.last_committed = r;
-                dragRect(drag.window, r);
-            }
-            drag.pending_rect = null;
+        if (rectChanged(drag, rect)) {
+            drag.last_commit_ns = now;
+            drag.last_committed = rect;
+            dragRect(drag.window, rect);
         }
+        drag.pending_rect = null;
     }
 }
 
@@ -675,8 +678,7 @@ pub fn stopDrag() void {
     if (g_state.drag.active) {
         const drag = &g_state.drag;
         if (drag.pending_rect) |r| {
-            const same = if (drag.last_committed) |last| std.meta.eql(last, r) else false;
-            if (!same) dragRect(drag.window, r);
+            if (rectChanged(drag, r)) dragRect(drag.window, r);
             drag.pending_rect = null;
         }
     }
@@ -733,10 +735,8 @@ pub fn honorConfigureRequest(
                     types.default_min_window_dim;
             }
             const limits = sizeEnvelope(e.size_hints, bw2, min_dim);
-            if (req.width) |v|
-                r.width = @intCast(std.math.clamp(@as(i32, v), limits.min_w, @max(limits.min_w, limits.max_w)));
-            if (req.height) |v|
-                r.height = @intCast(std.math.clamp(@as(i32, v), limits.min_h, @max(limits.min_h, limits.max_h)));
+            if (req.width) |v| r.width = clampOuter(v, limits.min_w, limits.max_w);
+            if (req.height) |v| r.height = clampOuter(v, limits.min_h, limits.max_h);
             // Aspect band (same shared fit as the drag path): only when the
             // request carries a size -- a position-only configure must NOT
             // re-lock a rect the user freed with Shift.

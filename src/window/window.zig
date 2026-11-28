@@ -30,7 +30,7 @@ const reply_mod = @import("reply");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
-const window_facts = @import("window_facts");
+const title_cache = @import("title_cache");
 const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
@@ -284,7 +284,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     reset();
     pipeline.clearFocusMru();
     focus.init();
-    window_facts.init(alloc);
+    title_cache.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init
     // runs, absent modules aren't in the array, so nothing else needs
     // a has_* guard. The fallible fan-out is stated here (init is its
@@ -301,7 +301,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
-    window_facts.deinit();
+    title_cache.deinit();
     // Uniform lifecycle dispatch: every compiled-in sub-system's
     // deinit runs, absent modules aren't in the array.
     dispatchAll(.deinit, .{});
@@ -450,12 +450,12 @@ fn unmanageWindow(win: u32) void {
     evictFor(win);
 
     // Local bookkeeping, before the grab
-    // window_facts.removeWindow unconditionally evicts the combined cache entry
+    // title_cache.removeWindow unconditionally evicts the combined cache entry
     // (geometry + border + size hints). All three removes are pure local
     // bookkeeping (no X requests), so they run pre-grab, letting the
     // post-close focus target be resolved against win-free query state,
     // with its input model queried BEFORE the grab.
-    window_facts.removeWindow(win);
+    title_cache.removeWindow(win);
 
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
@@ -534,7 +534,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 // set instead of paying a blocking round trip per event; flushPropertyRefresh
 // runs once per event batch (events.zig's post-batch housekeeping, before the
 // bar repaint) and refreshes each marked window exactly once, converging on
-// the property's final state. The set mirrors window_facts's discipline:
+// the property's final state. The set mirrors title_cache's discipline:
 // allocation-free IdMap, ceiling above the model store, set-full drops the
 // mark and falls back to an immediate refresh so correctness never depends
 // on capacity.
@@ -556,7 +556,7 @@ fn markPropertyDirty(win: u32, bit: u3, comptime refresh: fn (u32) void) void {
 }
 
 fn refreshTitleNow(win: u32) void {
-    if (window_facts.refreshTitle(core.getState().conn, win)) core.window.bump();
+    if (title_cache.refreshTitle(core.getState().conn, win)) core.window.bump();
 }
 
 fn refreshStrutsNow(win: u32) void {
@@ -580,7 +580,7 @@ pub fn flushPropertyRefresh() void {
         const bits = item.val.*;
         if (!query.isValidManagedWindow(win)) continue;
         if (bits & prop_dirty_title != 0) {
-            if (window_facts.refreshTitle(conn, win)) core.window.bump();
+            if (title_cache.refreshTitle(conn, win)) core.window.bump();
         }
         if (bits & prop_dirty_hints != 0) refreshSizeHints(win);
         if (bits & prop_dirty_strut != 0) {

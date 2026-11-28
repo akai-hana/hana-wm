@@ -27,7 +27,7 @@ pub const TitleRenderContext = struct {
 /// another's contents.
 pub const TitleEntry = struct {
     window: u32,
-    /// Borrowed from the WM-owned title cache (window_facts.peekTitle); the
+    /// Borrowed from the WM-owned title cache (title_cache.peekTitle); the
     /// bar refreshes every entry each frame before the draw.
     title: []const u8,
     geom: ?model.Rect,

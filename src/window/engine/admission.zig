@@ -33,7 +33,7 @@ const log = std.log.scoped(.admission);
 const query = @import("query");
 const icccm = @import("icccm");
 const reply_mod = @import("reply");
-const window_facts = @import("window_facts");
+const title_cache = @import("title_cache");
 const atoms = @import("atoms");
 const contract = @import("tiling_contract");
 const focus = @import("focus");
@@ -124,8 +124,7 @@ pub fn init(alloc: std.mem.Allocator) void {
     // Reset every field to its zero value so that a deinit() + init()
     // cycle (session restart, test harness) starts from a clean slate
     // rather than carrying over whatever the previous cycle left behind.
-    state = .{};
-    state.?.alloc = alloc;
+    state = .{ .alloc = alloc };
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
@@ -161,8 +160,7 @@ pub fn deinit() void {
 /// run, so a null allocator means boot is too early to touch the queue,
 /// the rules map, or the cookie pipeline.
 pub fn allocator() ?std.mem.Allocator {
-    if (state == null) return null;
-    return state.?.alloc;
+    return if (state) |s| s.alloc else null;
 }
 
 /// Rebuilds `rules` from a config's rule list (the pure half of
@@ -234,11 +232,9 @@ pub fn matchRule(
     instance: []const u8,
     class: []const u8,
 ) ?AdmissionRule {
-    if (class.len > 0) {
-        if (rules.get(class)) |ws| return .{ .workspace = ws, .float = ws == null };
-    }
-    if (instance.len > 0) {
-        if (rules.get(instance)) |ws| return .{ .workspace = ws, .float = ws == null };
+    for ([_][]const u8{ class, instance }) |key| {
+        if (key.len == 0) continue;
+        if (rules.get(key)) |ws| return .{ .workspace = ws, .float = ws == null };
     }
     return null;
 }
@@ -343,7 +339,7 @@ pub const AdmissionCookies = struct {
     /// the server processes it in parallel; drained by drainAdmissionCookies
     /// into the AdmissionDrain's transient_for.
     transient_cookie: xcb.xcb_get_property_cookie_t,
-    title_cookies: window_facts.TitleCookies,
+    title_cookies: title_cache.TitleCookies,
     /// EWMH window-type list + strut (F-80: foreign-dock edge claims). Fired
     /// with the batch; drained by drainAdmissionCookies into the drain's
     /// (is_dock, strut) facts, published to usable_area by the CALLER before
@@ -392,7 +388,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
         .protocols_cookie = protocols_cookie,
         .hints_cookie = hints_cookie,
         .transient_cookie = transient_cookie,
-        .title_cookies = window_facts.fireTitleCookies(conn, win),
+        .title_cookies = title_cache.fireTitleCookies(conn, win),
         .strut_cookies = struts.fireCookies(conn, win),
     };
 }
@@ -439,7 +435,7 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
     }
     const size_hints = window.parseSizeHints(cookies.normal_hints_cookie);
     icccm.populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
-    window_facts.collectTitleCookies(conn, win, cookies.title_cookies);
+    title_cache.collectTitleCookies(conn, win, cookies.title_cookies);
     const dock = struts.drain(conn, cookies.strut_cookies);
     return .{
         .size_hints = size_hints,
@@ -468,7 +464,7 @@ fn drainTransientFor(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_
 pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
     icccm.discardProtocolCookie(conn, cookies.c_wm_class);
     icccm.discardProtocolCookie(conn, cookies.c_net_wm_pid);
-    window_facts.discardTitleCookies(conn, cookies.title_cookies);
+    title_cache.discardTitleCookies(conn, cookies.title_cookies);
     struts.discard(conn, cookies.strut_cookies);
     inline for (.{
         cookies.normal_hints_cookie,
@@ -547,7 +543,7 @@ pub fn mapRequest(
         // Evict, or a refused window's XID lingers in the cache forever: XIDs
         // are recycled, so the next client to be handed this id would inherit
         // a stale title/child entry and read the wrong window.
-        window_facts.removeWindow(win);
+        title_cache.removeWindow(win);
         return;
     };
     // Install the admission drain's WM_NORMAL_HINTS on the fresh entry (no
@@ -569,17 +565,15 @@ pub fn mapRequest(
         // a new window takes the primary-column head slot, and the previous
         // head window drops one slot. Pinned headlessly by
         // spawnPlacementTarget (admission_test), which is the whole decision.
-        {
-            // Clamp the requested home workspace so a misconfigured target
-            // can't index past the `ws` array in ReleaseFast (defense in depth;
-            // the MapRequest front-end already resolves/clamps the target).
-            const home: model_mod.WSId = if (on_current)
-                m.current
-            else
-                window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(m.current.index));
-            if (spawnPlacementTarget(m, home)) |head_slot|
-                tiling_seam.reorderTiled(m, win, head_slot);
-        }
+        // Clamp the requested home workspace so a misconfigured target
+        // can't index past the `ws` array in ReleaseFast (defense in depth;
+        // the MapRequest front-end already resolves/clamps the target).
+        const home: model_mod.WSId = if (on_current)
+            m.current
+        else
+            window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(m.current.index));
+        if (spawnPlacementTarget(m, home)) |head_slot|
+            tiling_seam.reorderTiled(m, win, head_slot);
     }
     focus.initWindowGrabs(win); // protocol-side keygrabs, both paths do this
     core.window.bump(); // a window was admitted
@@ -636,11 +630,9 @@ pub fn admitWindow(
     // floating anchor.
     const as_float = float or transient_for != null;
     var float_rect: ?model_mod.Rect = if (as_float) window.getGeometry(cs.conn, win) else null;
-    if (float_rect) |*fr| {
-        if (transient_for) |parent| {
-            if (parentCenteredRect(parent, fr.*)) |centered| fr.* = centered;
-        }
-    }
+    if (float_rect) |*fr| if (transient_for) |parent| {
+        if (parentCenteredRect(parent, fr.*)) |centered| fr.* = centered;
+    };
     mapRequest(win, target_ws, on_current, float_rect, size_hints);
 }
 

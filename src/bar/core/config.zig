@@ -247,13 +247,9 @@ pub const Config = struct {
     /// Indicator glyph color for tag `is_current`: selected-state override
     /// (current only), else `indicator_color`, else the tag's text color.
     pub inline fn workspaceIndicatorColor(self: *const Config, is_current: bool) types.Color {
-        if (is_current) {
-            if (self.selected_indicator_color) |c| return c;
-            if (self.indicator_color) |c| return c;
-            return self.workspaceTextFg(true);
-        }
+        if (is_current) if (self.selected_indicator_color) |c| return c;
         if (self.indicator_color) |c| return c;
-        return self.workspaceTextFg(false);
+        return self.workspaceTextFg(is_current);
     }
 
     /// Text color for workspace icon label `is_current`: the per-state composite
@@ -345,16 +341,21 @@ pub const Config = struct {
 };
 /// The knob table: every bar scalar knob, exactly once. Targets are relative to
 /// THIS Config. The `needs` ordering is enforced by validateTable.
+/// A `[bar]` knob: the placement is always the bar section.
+fn barKnob(key: []const u8, target: []const u8, kind: knob.Kind, reader: []const u8) knob.Knob {
+    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, target, kind), reader);
+}
+
 fn barBool(key: []const u8, reader: []const u8) knob.Knob {
-    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, key, .b), reader);
+    return barKnob(key, key, .b, reader);
 }
 
 fn barScalable(key: []const u8, target: []const u8, reader: []const u8) knob.Knob {
-    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, target, .{ .scalable = 0.0 }), reader);
+    return barKnob(key, target, .{ .scalable = 0.0 }, reader);
 }
 
 fn barPlainColor(key: []const u8, reader: []const u8) knob.Knob {
-    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, key, .color), reader);
+    return barKnob(key, key, .color, reader);
 }
 
 /// Stamp a module-owned reader onto an otherwise plain knob (empty = none).
@@ -397,17 +398,17 @@ pub const knobs = [_]knob.Knob{
     barScalable("per_segment_padding", "spacing", ""),
     barScalable("indicator_size", "indicator_size", ""),
     barScalable("workspace_tag_width", "workspace_tag_width", ""),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "height")}, "height", .auto_scalable), ""),
+    barKnob("height", "height", .auto_scalable, ""),
     // Case-insensitive enum; unrecognized spellings warn and keep .top.
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "position")}, "bar_position", .{ .enum_read = .{ .T = BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }), ""),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "carousel_speed_px_s")}, "carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }), "title"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "carousel_gap_px")}, "carousel_gap_px", .{ .int = .{ .T = u16, .min = 0, .max = 1000 } }), "title"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "systatus_interval_ms")}, "systatus_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }), "systatus"),
+    barKnob("position", "bar_position", .{ .enum_read = .{ .T = BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }, ""),
+    barKnob("carousel_speed_px_s", "carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }, "title"),
+    barKnob("carousel_gap_px", "carousel_gap_px", .{ .int = .{ .T = u16, .min = 0, .max = 1000 } }, "title"),
+    barKnob("systatus_interval_ms", "systatus_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }, "systatus"),
     // volume read cadence via the slider's optional read-cadence hook
     // (brightness keeps its static 1000 ms).
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_read_interval_ms")}, "volume_read_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }), "volume"),
+    barKnob("volume_read_interval_ms", "volume_read_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }, "volume"),
     // max_batched_redraws: bar.zig's settle loop (core).
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "max_batched_redraws")}, "max_batched_redraws", .{ .int = .{ .T = u8, .min = 1, .max = 64 } }), ""),
+    barKnob("max_batched_redraws", "max_batched_redraws", .{ .int = .{ .T = u8, .min = 1, .max = 64 } }, ""),
 
     // Base palette: read before every color_from consumer below. The window-state
     // colors plus text_color are also document-global palette variables.
@@ -422,15 +423,15 @@ pub const knobs = [_]knob.Knob{
 
     // clock_format: read by clock.zig AND core render/drawing.zig
     // (formatString), so it stays tree-read.
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "clock_format")}, "clock_format", .str), ""),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "run_prompt")}, "run_prompt", .str), "prompt"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_format")}, "volume_format", .str), "volume"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_muted_format")}, "volume_muted_format", .str), "volume"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "brightness_format")}, "brightness_format", .str), "brightness"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "brightness_device")}, "brightness_device", .str), "brightness"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "indicator_location")}, "indicator_location", .{ .enum_read = .{ .T = IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }), "tags"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "indicator_padding")}, "indicator_padding", .ratio), "tags"),
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "transparency")}, "transparency", .ratio_strict), ""),
+    barKnob("clock_format", "clock_format", .str, ""),
+    barKnob("run_prompt", "run_prompt", .str, "prompt"),
+    barKnob("volume_format", "volume_format", .str, "volume"),
+    barKnob("volume_muted_format", "volume_muted_format", .str, "volume"),
+    barKnob("brightness_format", "brightness_format", .str, "brightness"),
+    barKnob("brightness_device", "brightness_device", .str, "brightness"),
+    barKnob("indicator_location", "indicator_location", .{ .enum_read = .{ .T = IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }, "tags"),
+    barKnob("indicator_padding", "indicator_padding", .ratio, "tags"),
+    barKnob("transparency", "transparency", .ratio_strict, ""),
     // Falls back to bar-wide fg only when the key is present; absent keeps
     // the field null. Read via Config helpers, inlined into tags.zig.
     barColorOpt("indicator_color", "indicator_color", "fg", "tags"),
@@ -453,7 +454,7 @@ pub const knobs = [_]knob.Knob{
     // fields -- each maps onto the same target as its canonical knob. A config
     // that used the old keys keeps working with no edit, which is why this is a
     // rename-with-alias. Aliases share the canonical knob's Knob.reader ownership.
-    readerOr(knob.knob(&.{knob.place(types.section_bar, "drun_prompt")}, "run_prompt", .str), "prompt"),
+    barKnob("drun_prompt", "run_prompt", .str, "prompt"),
     barColor("drun_bg", "run_bg", "bg", false, "prompt"),
     barColor("drun_fg", "run_fg", "fg", false, "prompt"),
     barColor("drun_prompt_color", "run_prompt_color", types.palette_primary_color, false, "prompt"),

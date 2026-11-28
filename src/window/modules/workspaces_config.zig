@@ -17,6 +17,10 @@ const knob = @import("knob");
 
 pub const Config = struct {
     count: u8 = types.default_workspace_count,
+    /// Whether a window may be pinned to every workspace (`pin_window`, and
+    /// EWMH all-desktops requests). Disabling it makes new pin requests
+    /// no-ops; windows already pinned keep their state until unpinned.
+    pinning: bool = true,
     rules: std.ArrayList(types.Rule) = .empty,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -34,6 +38,7 @@ pub const knobs = [_]knob.Knob{
         "count",
         .{ .int = .{ .T = u8, .min = 1, .max = model.max_workspaces } },
     ),
+    knob.knob(&.{knob.place(types.section_workspaces, "pinning")}, "pinning", .b),
 };
 
 comptime {

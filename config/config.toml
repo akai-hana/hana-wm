@@ -94,7 +94,8 @@ snap_distance = 16 # Pixel distance at which windows snap together
 
 # Workspaces
 [workspaces]
-count = 8 # Number of workspaces [1-64]
+count   = 8    # Number of workspaces [1-64]
+pinning = true # Allow pinning windows to every workspace (Mod+Shift+5)
 
 # Bar
 [bar]

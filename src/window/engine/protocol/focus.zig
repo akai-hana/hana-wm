@@ -90,8 +90,7 @@ const State = struct {
 var state: State = .{};
 
 pub fn init() void {
-    state = .{};
-    state.net_active_window = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
+    state = .{ .net_active_window = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0 };
 }
 
 pub fn deinit() void {
@@ -514,11 +513,12 @@ pub inline fn yieldsModelFocus(t: FocusTransition) bool {
 /// policies as DATA, in one row, instead of three separate switches that
 /// each have to be re-read to answer "what does a workspace switch do?".
 const Etiquette = struct {
-    /// Whether a focus target is raised here. The TILED exclusion is not in
-    /// here because it is a property of the window, not of the reason: sync's
-    /// raise-the-winner pass owns a tiled window's stacking, and a pre-raise
-    /// would be a redundant request creating an intermediate compositor
-    /// frame. `prepareFocus` narrows it with that exclusion.
+    /// Whether a focus target is raised here. The RECONCILER-OWNED exclusion
+    /// is not in here because it is a property of the window, not of the
+    /// reason: sync's winner/float-re-assert pass owns a tiled or covering
+    /// window's stacking, and a pre-raise would be a redundant request creating
+    /// an intermediate compositor frame (or lift a cover above the pinned-float
+    /// layer). `prepareFocus` narrows it with that exclusion.
     raise: bool,
     /// The crossing-suppression reason to set, or null to LEAVE THE CURRENT
     /// ONE ALONE. Null is the honest encoding for "this reason has no opinion"
@@ -655,7 +655,7 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
     const et = etiquetteFor(reason);
-    const raise = et.raise and !query.isTiledMode(win);
+    const raise = et.raise and !query.stackingOwnedByReconcile(win);
     const same_applied = state.last_applied == win;
     if (same_applied and !raise) return .none;
     const old: ?u32 = if (same_applied) null else state.last_applied;
@@ -767,11 +767,11 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             const conn = core.getState().conn;
 
             if (intent.flags.set_input_focus) focusNow(conn, intent.win);
-            // Only non-tiled windows ever carry the raise flag (prepareFocus's
-            // tiled exclusion), so this is a FLOAT raise: record it at the top
-            // of the ledger's float raise order, which the reconcile's
-            // re-assert replays to keep floating windows above tiled ones
-            // without disturbing their exact click order.
+            // Only windows the reconcile does not stack (not tiled, not
+            // covering) ever carry the raise flag, so this is a FLOAT raise:
+            // record it at the top of the ledger's float raise order, which
+            // the reconcile's re-assert replays to keep floating windows above
+            // tiled ones without disturbing their exact click order.
             if (intent.flags.raise) {
                 requests.raiseWindow(conn, intent.win);
                 reconcile.floatRaise(intent.win);

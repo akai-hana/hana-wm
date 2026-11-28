@@ -13,6 +13,26 @@ const io = std.testing.io;
 
 const allowlist_path = "dev/test-coverage-allowlist.txt";
 
+/// The module name the build registers a production file under.
+///
+/// Mirrors `moduleNameFor` in build.zig: `src/<system>/core/<name>.zig` is a
+/// naming scope that re-materializes `<system>_<name>` (and the bare system
+/// name when the file is named after its system). `core/` and `test/` are not
+/// systems. The build is the authority; keep the two rules in step.
+fn moduleNameFor(alloc: std.mem.Allocator, rel_path: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(rel_path);
+    const dir = std.fs.path.dirname(rel_path) orelse return alloc.dupe(u8, stem);
+    if (!std.mem.eql(u8, std.fs.path.basename(dir), "core")) return alloc.dupe(u8, stem);
+    // `rel_path` is relative to `src/`, so a system directory has no parent.
+    const system_dir = std.fs.path.dirname(dir) orelse return alloc.dupe(u8, stem);
+    if (std.fs.path.dirname(system_dir) != null) return alloc.dupe(u8, stem);
+    const system = std.fs.path.basename(system_dir);
+    if (system.len == 0) return alloc.dupe(u8, stem);
+    if (std.mem.eql(u8, system, "core") or std.mem.eql(u8, system, "test")) return alloc.dupe(u8, stem);
+    if (std.mem.eql(u8, stem, system)) return alloc.dupe(u8, stem);
+    return std.fmt.allocPrint(alloc, "{s}_{s}", .{ system, stem });
+}
+
 /// Production stems: every `src/**/*.zig` that is not a test file itself.
 /// Build-generated modules (surfaces, composed, tiling_seam, ...) are not
 /// files under src/ and never appear; the vendored runner lives under dev/.
@@ -32,7 +52,7 @@ fn collectProductionStems(alloc: std.mem.Allocator) !std.StringHashMap(void) {
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
         if (std.mem.endsWith(u8, entry.path, "_test.zig")) continue;
         if (std.mem.startsWith(u8, entry.path, "test/")) continue;
-        const name = try alloc.dupe(u8, std.fs.path.stem(entry.path));
+        const name = try moduleNameFor(alloc, entry.path);
         const gop = try set.getOrPut(name);
         if (gop.found_existing) alloc.free(name) else gop.key_ptr.* = name;
     }

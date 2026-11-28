@@ -1,7 +1,8 @@
 //! Border policy for tiled and floating windows — an OPTIONAL window module.
 //! Resolves border visibility/color/width (hiding borders for covering
-//! fullscreen windows and windows behind covering occupants), applies them
-//! with ledger-backed dedup, and owns the per-batch recolor sweeps.
+//! fullscreen windows and windows behind covering occupants, except floats
+//! pinned to every workspace, which stay above the cover), applies them with
+//! ledger-backed dedup, and owns the per-batch recolor sweeps.
 //!
 //! DELETION SEMANTICS: the registry shortens, `borders` dispatches no-op, and
 //! `window.borderColorOf` falls back to constant 0 — windows keep the
@@ -24,7 +25,9 @@ const query = @import("query");
 /// occupant holds the workspace it actually lives on. `current` is the
 /// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
 /// covering-mode reads for fullscreen-absent builds; `occupants` is the
-/// precomputed per-workspace table (`model.coveringOccupants`).
+/// precomputed per-workspace table (`model.coveringOccupants`). A float pinned
+/// to every workspace is NOT behind the cover: the reconciler keeps it above,
+/// so it keeps its border.
 pub fn isBehindCoveringWindowWith(
     m: *const model.Model,
     win: u32,
@@ -32,7 +35,8 @@ pub fn isBehindCoveringWindowWith(
     comptime has_fullscreen: bool,
     occupants: []const ?model.WindowId,
 ) bool {
-    if (!m.store.has(win)) return false;
+    const e = m.store.get(win) orelse return false;
+    if (model.isPinnedFloat(e)) return false;
     if (model.findHome(m, win)) |w| {
         if (w.index < occupants.len) return occupants[w.index] != null;
     }
@@ -92,7 +96,7 @@ fn applyWidth(conn: core.Connection, win: u32) void {
 ///
 /// The color dedup lives in the SENT LEDGER beside the width record, so
 /// sweep and reconcile share one "has this pixel gone out" record — deriving
-/// it from window_facts would let a reconcile-sent pixel go unrecorded for
+/// it from title_cache would let a reconcile-sent pixel go unrecorded for
 /// the sweep (and vice versa).
 fn applyWith(conn: core.Connection, win: u32, occupants: []const ?model.WindowId) void {
     applyWidth(conn, win);

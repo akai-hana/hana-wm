@@ -41,11 +41,11 @@ wire_allowed() {
         # The apply* visibility family (map/unmap on visibility change,
         # raise-above-others, screen-claim publish) lives here too: it was
         # split out as wire/visibility.zig, then folded back in (Phase 3 of
-        # the bar refactor) with the pure policy left in src/bar/visibility.zig.
+        # the bar refactor) with the pure policy left in src/bar/engine/visibility.zig.
         # surface.zig holds the bar frame's wire traffic (the xcb_flush that
         # orders fills under glyphs, moved here from drawing.zig with the
         # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
-        src/bar/bar.zig|src/bar/render/surface.zig|src/bar/wire/win.zig) ;;
+        src/bar/bar.zig|src/bar/engine/render/surface.zig|src/bar/engine/wire/win.zig) ;;
 
         # Window event handlers (merged client_events.zig): ConfigureRequest
         # compliance (client-requested geometry honored for floating windows
@@ -55,7 +55,7 @@ wire_allowed() {
         # crossing. Split out of window.zig (which no longer sends wire
         # itself); window.zig re-exports the handlers as the dispatch
         # surface. Merged back from configure/client_message/crossing.zig.
-        src/window/protocol/client_events.zig) ;;
+        src/window/engine/protocol/client_events.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
         # event mask (PropertyNotify / StructureNotify / FocusChange
@@ -63,13 +63,13 @@ wire_allowed() {
         # setup for the windows this module admits, split out of
         # window.zig with the admission policy (rules map, spawn queue,
         # five-cookie pipeline).
-        src/window/admission.zig) ;;
+        src/window/engine/admission.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
         # protocol (kept in window.*). focus.zig rides the
         # allowlist for that protocol duty (set_input_focus / raise / the
         # _NET_ACTIVE_WINDOW property write).
-        src/window/protocol/focus.zig) ;;
+        src/window/engine/protocol/focus.zig) ;;
 
         # (No entry for src/core/loop/pipeline.zig or
         # src/window/modules/floating.zig: their former raiseWindowNow /
@@ -150,7 +150,7 @@ wire_allowed() {
         # client protocol text, not sync-bound wire mutations.
         # client_events.zig is allowlisted above for the ConfigureRequest
         # family; icccm.zig joins them here for this family.
-        src/window/protocol/icccm.zig) ;;
+        src/window/engine/protocol/icccm.zig) ;;
 
         # src/test/harness/fixture.zig is a TEST DOUBLE: it drives a real X
         # connection owned by the X-gated harness to destroy leftover windows
@@ -250,8 +250,9 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 
 # Rule 3: no xcb imports/references in the pure state vocabulary
 # (model.zig), the split contract vocabulary
-# (tiling_contract.zig, contract_dispatch.zig, window_contract.zig,
-# bar_contract.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# (`src/core/architecture/tiling_contract.zig`, `contract_dispatch.zig`,
+# `src/window/core/contract.zig`,
+# `src/bar/core/contract.zig`), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # strip runs through the shared build-time scanner
 # (dev/build-support/source_scan.zig, via dev/build-support/rule3.zig) --
@@ -279,7 +280,7 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # contract_window.zig / contract_segment.zig into the monolith and the
 # monolith's later split into per-engine contracts are both history;
 # the sweep follows the files, not the lineage.)
-mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
+mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/core/contract.zig src/bar/core/contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
 if [ "${#rule3_files[@]}" -eq 0 ]; then
     viol "rule 3 (sweep input set is empty)"
     hits=""
@@ -324,7 +325,7 @@ tiled_order_allowed() {
         src/core/model.zig) ;;
         # The window layer's register/unregister write API -- the one path
         # every other file is supposed to call instead of appending itself.
-        src/window/state/window_state_ops.zig) ;;
+        src/window/engine/state/window_state_ops.zig) ;;
         # Workspace moves re-home membership (moveToWorkspace semantics:
         # remove from the old list, append to the new one).
         src/window/modules/workspaces.zig) ;;

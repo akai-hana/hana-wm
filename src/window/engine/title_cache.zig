@@ -239,7 +239,7 @@ fn takePropertyReply(
 /// Caches `title` for `win` by copying it into the entry's inline buffer
 /// (POD storage, no heap, no free). Public because it is the cache's write
 /// side (the pipelined admission path reaches it through
-/// `collectTitleCookies`), which `window_facts_test` exercises for the
+/// `collectTitleCookies`), which `title_cache_test` exercises for the
 /// overwrite/cap lifecycle.
 ///
 /// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW window's

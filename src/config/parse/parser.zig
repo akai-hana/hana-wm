@@ -222,35 +222,28 @@ const Parser = struct {
     }
 
     fn parseSection(self: *Parser) ParseError![]const u8 {
-        _ = self.consume();
+        _ = self.consume(); // '['
         self.skipWhitespace();
 
         const start = self.pos;
-        while (self.peek()) |c| {
-            if (c == ']') break;
-            if (c == '\n') return ParseError.InvalidSection;
-            _ = self.consume();
-        }
+        const rest = self.content[start..];
+        const close = std.mem.indexOfScalar(u8, rest, ']') orelse return ParseError.InvalidSection;
+        // A section header is one line; a newline before ']' is malformed.
+        if (std.mem.indexOfScalar(u8, rest[0..close], '\n') != null) return ParseError.InvalidSection;
 
-        if (self.peek() != ']') return ParseError.InvalidSection;
-        _ = self.consume();
-
-        const name = std.mem.trim(u8, self.content[start .. self.pos - 1], " \t\r");
-        return if (name.len > 0) name else ParseError.InvalidSection;
+        const name = std.mem.trim(u8, rest[0..close], " \t\r");
+        if (name.len == 0) return ParseError.InvalidSection;
+        self.pos = start + close + 1; // past ']'; no newline was skipped
+        return name;
     }
 
     fn parseKey(self: *Parser) ParseError![]const u8 {
         self.skipWhitespace();
         const start = self.pos;
-        while (self.pos < self.content.len) {
-            switch (self.content[self.pos]) {
-                // '\r' joins the break set so a bare key on a CRLF file (e.g.
-                // a `[workspace.rules]` class name) can't soak up the
-                // carriage return and silently mismatch rule targets.
-                '=', ' ', '\t', '\n', '\r' => break,
-                else => self.pos += 1,
-            }
-        }
+        // '\r' joins the break set so a bare key on a CRLF file (e.g.
+        // a `[workspace.rules]` class name) can't soak up the
+        // carriage return and silently mismatch rule targets.
+        self.pos = std.mem.indexOfAnyPos(u8, self.content, start, "= \t\n\r") orelse self.content.len;
         // A slice into `content` (arena-backed by the caller), like every
         // parsed string: nothing is duped or freed.
         const key = self.content[start..self.pos];
@@ -364,18 +357,10 @@ const Parser = struct {
     // colors rather than being mistaken for a comment.
     fn parseBareToken(self: *Parser) ?[]const u8 {
         const start = self.pos;
-        while (self.pos < self.content.len) {
-            const ch = self.content[self.pos];
-            switch (ch) {
-                ' ', '\t', '\r', '\n', ',', ';', ']' => break,
-                '#' => {
-                    if (self.pos == start) {
-                        self.pos += 1;
-                    } else break;
-                },
-                else => self.pos += 1,
-            }
-        }
+        // Consume a leading '#' unconditionally; it is only a comment marker
+        // after the first character.
+        if (self.peek() == '#') self.pos += 1;
+        self.pos = std.mem.indexOfAnyPos(u8, self.content, self.pos, " \t\r\n,;]#") orelse self.content.len;
         const token = self.content[start..self.pos];
         return if (token.len > 0) token else null;
     }
@@ -586,17 +571,12 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []c
                 continue;
             };
 
-            if (doc.sections.getPtr(section_name)) |existing| {
-                // Duplicate section header: keep filling the existing section
-                // so duplicate keys accumulate as if the blocks were one
-                // section, consistent with the cross-file merge path.
-                current_section = existing;
-            } else {
-                try doc.sections.put(section_name, .{});
-                current_section = doc.sections.getPtr(section_name).?;
-                current_section.name = section_name;
-            }
-
+            // Duplicate section header: keep filling the existing section so
+            // duplicate keys accumulate as if the blocks were one section,
+            // consistent with the cross-file merge path.
+            const gop = try doc.sections.getOrPut(section_name);
+            if (!gop.found_existing) gop.value_ptr.* = .{ .name = section_name };
+            current_section = gop.value_ptr;
             continue;
         }
 

@@ -9,7 +9,7 @@ const core = @import("core");
 const bar_config = @import("bar_config");
 const query = @import("query");
 const model = @import("model");
-const window_facts = @import("window_facts");
+const title_cache = @import("title_cache");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const vocab = @import("vocab");
@@ -202,10 +202,10 @@ const TitleScratch = struct {
     /// first draw so scanLiveFrame can synthesize the set without naming the addon.
     minimized_api: segmod.MinimizedApi = .{},
     /// Storage for the focused window's title. The per-window titles on
-    /// `frame.entries` borrow straight from the window_facts (refreshed every frame
+    /// `frame.entries` borrow straight from the title_cache (refreshed every frame
     /// before the draw); the focused title is copied instead, because a borrowed
     /// slice would leave the DrawCtx pointing into a cache a title change overwrites.
-    focused_title_buf: [window_facts.max_title_len]u8 = undefined,
+    focused_title_buf: [title_cache.max_title_len]u8 = undefined,
 };
 
 /// Last-seen core fact revisions. Each is diffed against the live core fact in

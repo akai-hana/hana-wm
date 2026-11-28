@@ -236,6 +236,24 @@ test "[bar.modules.workspaces] and [workspaces] agree on count" {
     try testing.expectEqual(@as(u8, 5), nested.workspaces.count);
 }
 
+test "[workspaces] pinning defaults on and parses false" {
+    var default_on = try loadToml(testing.allocator, "ws-pin-default",
+        \\[workspaces]
+        \\count = 3
+        \\
+    );
+    defer default_on.deinit(testing.allocator);
+    try testing.expect(default_on.workspaces.pinning);
+
+    var disabled = try loadToml(testing.allocator, "ws-pin-off",
+        \\[workspaces]
+        \\pinning = false
+        \\
+    );
+    defer disabled.deinit(testing.allocator);
+    try testing.expect(!disabled.workspaces.pinning);
+}
+
 test "per_segment_padding feeds BarConfig.spacing; workspaces count pads icons" {
     var cfg = try loadToml(testing.allocator, "spacing-icons",
         \\[bar]

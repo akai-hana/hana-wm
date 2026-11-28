@@ -1,4 +1,4 @@
-//! `parseBar` (bar_sections.zig) unit tests: the bar's non-scalar structures
+//! `parseBar` (src/bar/core/sections.zig) unit tests: the bar's non-scalar structures
 //! the comptime schema walk does not cover -- fonts, the indicator mirror
 //! pair, workspace icons (array/string/pad forms), the per-anchor bar layout
 //! columns with the default-layout fallbacks, and the P1-46 fail bar on an

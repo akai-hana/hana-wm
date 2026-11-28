@@ -130,7 +130,7 @@ fn Family(comptime family_field: []const u8, comptime F: type) type {
 }
 
 /// The seven single-binder families, one namespace each (see the family
-/// structs in `window_contract.zig`). Dispatch is first-match, so each
+/// structs in `src/window/core/contract.zig`). Dispatch is first-match, so each
 /// family hook is bound by at most one module (asserted at comptime).
 pub const hide = Family("hide", contract.HideHooks);
 pub const covering = Family("covering", contract.CoveringHooks);
