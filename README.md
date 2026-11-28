@@ -42,16 +42,18 @@
 
 ## About 花
 
-**hana** is a dynamic X window manager written in Zig, focused in **modularity**, **flexibility**, and **user-friendliness**. \
+**hana** is a dynamic X window manager written in Zig, focused in **comfort** and **flexibility.**. \
 It includes tiling and floating window management, an integrated status bar, TOML configuration, and binary/config hot-reloading.
 
-**This window manager is fully modular.** All the different components are divided in systems/sub-systems and components, and organized in a hierarchical dir structure, and the build system wires them up on comptime. Any system or component that isn't strictly necessary can be removed from the dir structure, and the binary will exclude them on recompilation.
+**This WM is fully modular.** All the different components are divided in systems/sub-systems and components, and organized in a hierarchical dir structure, with the build system wiring them up on comptime. Any system or component that isn't strictly necessary can be removed from the dir structure, and the binary will exclude them on recompilation.
 
 ---
 
 ## Objectives
 
-The highest priority of this WM is to be as **modular** as possible. It achieves this by dividing hana's code into its different segments:
+hana seeks to be as flexible of a window manager as possible.
+
+One way it achieves this is through **modularity**:
 
 ```
 $ tree src -L 1
@@ -65,9 +67,31 @@ src
 └── window
 ```
 
-Aside from the main loop, all other features are organized into sub-directories, each containing one system.
+hana's codebase is organized into a hierarchical dir structure.
 
-Each system has one eponymous file directly inside it (e.g. `bar/bar.zig`), which depending on the system, acts as either a dispatch engine, or facade of sorts, acting as a central coordinator of its system, managing the sub-systems and components under it.
+At the top sits the main loop, and one directory per system. Every system is subsequently segmented into sub-directories, to separate core, sub-systems, and extension codefiles.
+
+Each system has one eponymous file directly under it (e.g. `bar/bar.zig`), which acts as a central coordinator or dispatch engine of its system, managing the sub-systems and components under its system. This would be the "core" of each system.
+
+a9ef2d5
+ · 
+16 hours ago
+
+    Preview
+    Code
+    Blame
+
+347 lines (232 loc) · 21.6 KB
+a9ef2d5
+ · 
+16 hours ago
+
+    Preview
+    Code
+    Blame
+
+347 lines (232 loc) · 21.6 KB
+
 
 Sub-systems are ().
 
