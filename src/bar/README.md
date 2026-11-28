@@ -12,8 +12,8 @@ carries no segment logic of its own.
 - `core/contract.zig` (module `bar_contract`) is the segment hook set
   (`Segment`, `Frame`, `Painted`, `ClickCtx`, `BarOverlay`, `DirtySources`,
   opaque `KeyPressEvent`). It is X-free and feature-free.
-- `core/config.zig` parses the `[bar]` subtree, and `core/sections.zig` parses
-  its non-scalar pieces (fonts, icons, layout columns).
+- `core/config.zig` parses the `[bar]` subtree: scalar knobs plus the
+  non-scalar pieces (fonts, icons, layout columns).
 - `engine/state.zig` holds the live `State`/`Bar` handle and the shared `gBar`
   pointer. It is a leaf, so `engine/render/` and `engine/wire/` can read it
   without importing `bar.zig`.

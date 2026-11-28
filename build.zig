@@ -3473,8 +3473,8 @@ const Module = struct {
             if (std.mem.eql(u8, layer, "tiling")) {
                 if (std.mem.startsWith(u8, dep_path, "src/tiling/")) return true;
                 if (std.mem.eql(u8, dep, "tiling_contract")) return true;
-                // tiling_sections canonicalizes layout names through the
-                // config-layer vocab module (which itself stays pure).
+                // the tiling config fragment canonicalizes layout names through
+                // the config-layer vocab module (which itself stays pure).
                 if (std.mem.eql(u8, dep, "layout_names")) return true;
             }
             if (std.mem.eql(u8, layer, "config")) {

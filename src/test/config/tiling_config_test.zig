@@ -10,12 +10,11 @@ const std = @import("std");
 const testing = std.testing;
 
 const parser = @import("parser");
-const tiling_sections = @import("tiling_sections");
 const tiling_config = @import("tiling_config");
 
 fn load(a: std.mem.Allocator, cfg: *tiling_config.Config, src: []const u8) !void {
-    var doc = try parser.parse(a, src, "<tiling-sections-test>");
-    try tiling_sections.parseTilingStructures(testing.allocator, &doc, cfg);
+    var doc = try parser.parse(a, src, "<tiling-config-test>");
+    try tiling_config.parseTilingStructures(testing.allocator, &doc, cfg);
 }
 
 test "no layouts array: the layout string seeds the cycle, canonicalized" {

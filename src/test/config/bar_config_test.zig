@@ -1,4 +1,4 @@
-//! `parseBar` (src/bar/core/sections.zig) unit tests: the bar's non-scalar structures
+//! `parseBar` (src/bar/core/config.zig) unit tests: the bar's non-scalar structures
 //! the comptime schema walk does not cover -- fonts, the indicator mirror
 //! pair, workspace icons (array/string/pad forms), the per-anchor bar layout
 //! columns with the default-layout fallbacks, and the P1-46 fail bar on an
@@ -9,14 +9,13 @@
 const std = @import("std");
 const testing = std.testing;
 
-const bar_sections = @import("bar_sections");
 const parser = @import("parser");
 const bar_config = @import("bar_config");
 const diagnostics = @import("diagnostics");
 
 fn load(a: std.mem.Allocator, cfg: *bar_config.Config, src: []const u8) !void {
-    var doc = try parser.parse(a, src, "<bar-sections-test>");
-    try bar_sections.parseBar(testing.allocator, &doc, cfg);
+    var doc = try parser.parse(a, src, "<bar-config-test>");
+    try bar_config.parseBar(testing.allocator, &doc, cfg);
 }
 
 test "no per-anchor layout: defaults land, icons pad to the workspace count" {
@@ -127,7 +126,7 @@ test "an unknown layout segment name fails the load with the file:line, once per
     try testing.expect(diag.contains("workspacs"));
     try testing.expect(diag.contains("cpuo"));
     try testing.expect(diag.contains("[bar.layout.left]"));
-    try testing.expect(diag.contains("<bar-sections-test>:4"));
+    try testing.expect(diag.contains("<bar-config-test>:4"));
     try testing.expect(diag.count() >= 2);
 }
 
@@ -220,7 +219,7 @@ test "padWorkspaceIcons tops a pre-seeded list up to the workspace count" {
     try cfg.workspace_icons.append(testing.allocator, try testing.allocator.dupe(u8, "X"));
 
     var doc = try parser.parse(arena.allocator(), "", "<pad-icons>");
-    try bar_sections.padWorkspaceIcons(testing.allocator, &doc, &cfg);
+    try bar_config.padWorkspaceIcons(testing.allocator, &doc, &cfg);
 
     try testing.expectEqual(@as(usize, 9), cfg.workspace_icons.items.len);
     try testing.expectEqualStrings("X", cfg.workspace_icons.items[0]);
