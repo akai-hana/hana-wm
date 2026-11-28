@@ -4,8 +4,8 @@
 //! local — beside the window subsystem, not in core — because only the
 //! window owner consumes this contract. Dispatch primitives
 //! (`providerOf`, `callAll`) live in `contract_dispatch.zig`; cross-engine
-//! tiling vocabulary lives in `tiling_contract.zig`. Pure vocabulary, no
-//! X11, no feature imports.
+//! tiling vocabulary lives with its subsystem under `src/tiling/`. Pure
+//! vocabulary, no X11, no feature imports.
 //!
 //! The single-binder hooks are GROUPED into per-family structs: a community
 //! module binds one family at a time (`.{ .hide = .{ ... } }`), the window

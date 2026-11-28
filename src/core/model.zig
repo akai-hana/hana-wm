@@ -314,7 +314,7 @@ pub const Store = bounded.Store;
 
 /// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated), 16 keeps
 /// the per-workspace focus MRU small; defined capacities mean state transitions never
-/// allocate. tiling_contract's hintsFor scan is O(n) in max_tiled_windows, not this
+/// allocate. layout_port's hintsFor scan is O(n) in max_tiled_windows, not this
 /// store cap.
 pub const store_capacity = 128;
 

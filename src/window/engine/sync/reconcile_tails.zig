@@ -6,8 +6,8 @@
 //! because each is one MODEL transition plus one RECONCILE entry: the pure
 //! tiling layer may not import `pipeline`/`core` (build.zig's
 //! `assertPureLayerImports`), so a transition that reaches a server grab
-//! cannot sit under it. The tiling ENGINE is still reached through the
-//! build-generated `tiling_seam`, never by naming `src/tiling/`.
+//! cannot sit under it. The layout behavior is still reached through the
+//! generic `layout_provider` port, never by naming `src/tiling/`.
 
 const std = @import("std");
 const core = @import("core");
@@ -16,13 +16,11 @@ const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const build_options = @import("build_options");
-const contract = @import("tiling_contract");
 const usable_area = @import("usable_area");
-// Layout-name resolution for the state dump and the layout cycle, via the
-// build-generated seam. The seam also carries the has_tiling-gated op stubs
-// (reorderTiled/stepTiled/...), so these transitions need no per-call guard.
-const tiling_seam = @import("tiling_seam");
-const tiling = tiling_seam.tiling;
+// Layout metadata and order transitions via the build-generated generic
+// provider. When no layout subsystem is present the provider is inert, so
+// these transitions need no per-call tiling guard.
+const layout = @import("layout_provider").provider;
 
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
@@ -109,7 +107,7 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;
     const p = &m.ws[m.current.index].params;
-    const next_kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
+    const next_kind = layout.cycleKind(p.kind, dir, cfg.layouts.items);
     p.kind = next_kind;
     p.variant_idx = 0;
     // global_layout: the flag is a real behavior, not just a parsed knob —
@@ -128,17 +126,17 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
 }
 
 pub fn stepVariantDir(dir: i32) void {
-    if (!build_options.has_tiling) return;
+    if (layout.count == 0) return;
     const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
-    const n = tiling.variantCount(p.kind);
+    const n = layout.variantCount(p.kind);
     p.variant_idx = @intCast(model_mod.wrapIndex(p.variant_idx, dir, n));
     retile(.{ .full_redraw = true }, null);
 }
 
 pub fn adjustPrimaryWidthAction(delta: f32) void {
     const m = pipeline.mut();
-    tiling_seam.adjustPrimaryWidth(m, delta);
+    layout.adjustPrimaryWidth(m, delta);
     pipeline.reconcileGrab(.{});
 }
 
@@ -174,7 +172,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
     // action is a no-op rather than swapping/focusing an unrelated entry.
     if (mru.len < 2 or mru[0] != focused) return;
     const displaced = focus.previousFocusCandidate(m, m.current, focused) orelse return;
-    tiling_seam.swapFocusedWithPrevious(m);
+    layout.swapFocusedWithPrevious(m);
     var ft: focus.FocusTransition = .none;
     if (focus_swap) {
         // A no_input displaced window must not take model focus.
@@ -190,13 +188,13 @@ pub fn moveFocused(delta: i32) void {
     const win = m.focused orelse return;
     // Modulo wrap (dwm stack rotate): stepping past either edge of the home
     // list's tiled order cycles back around, matching the focus-step parity.
-    tiling_seam.stepTiled(m, win, delta);
+    layout.stepTiled(m, win, delta);
     pipeline.reconcileGrab(.{});
 }
 
 /// Viewport transitions (scrollable-tile viewport over the layout params).
-/// The viewport is resolved through the layout METADATA (slotWidth/maxOffset
-/// hooks), so it rides the same `tiling_seam` reach as the cycles above.
+/// The viewport is resolved through the provider's viewport hook, so it rides
+/// the same generic port reach as the cycles above.
 const ViewportContext = struct {
     active: bool,
     tiled_count: usize,
@@ -207,20 +205,15 @@ const ViewportContext = struct {
 const viewport_inactive: ViewportContext =
     .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
 
-/// Viewport context for the active layout, resolved through the layout
-/// metadata: a layout "has a viewport" iff it registers the slotWidth/
-/// maxOffset hooks. Inactive for layouts without a viewport or an
-/// out-of-range kind.
+/// Viewport context for the active layout, resolved through the provider's
+/// viewport hook: a layout "has a viewport" iff it provides the hook.
+/// Inactive for layouts without a viewport or an out-of-range kind.
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
-    if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current.index].params;
-    const md = contract.moduleOf(p.kind) orelse return viewport_inactive;
-    if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
     const n = model_mod.tiledCountOnWs(m, m.current);
     const wa = usable_area.workArea(core.getState().screen);
-    const slot_w = md.slotWidth.?(wa.width);
-    const max_off = md.maxOffset.?(n, slot_w, wa.width);
-    return .{ .active = true, .tiled_count = n, .slot_w = slot_w, .max_off = max_off };
+    const vp = layout.viewport(p.kind, n, wa.width) orelse return viewport_inactive;
+    return .{ .active = true, .tiled_count = n, .slot_w = vp.slot_w, .max_off = vp.max_off };
 }
 
 /// Clamp an updated viewport offset to the layout's content span and stamp
@@ -292,7 +285,7 @@ fn activeViewport() ?struct {
     p: *model_mod.LayoutParams,
     sc: ViewportContext,
 } {
-    if (!build_options.has_tiling) return null;
+    if (layout.count == 0) return null;
     // No `has_bar` gate: the viewport clamps to `usable_area.workArea`, which
     // is the full screen without a bar, so a scroll layout works headless
     // too — the clamp target is bar-independent.

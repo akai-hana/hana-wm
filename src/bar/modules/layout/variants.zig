@@ -5,44 +5,25 @@ const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const window = @import("window");
-const contract = @import("tiling_contract");
+const layout = @import("layout_provider").provider;
 const bar_contract = @import("bar_contract");
-const core = @import("core");
 const segmod = @import("segment");
 
-// Layout registry (build-generated); the active layout is a `u8` index into
-// it, and each module carries its own variant indicator list. Empty when the
-// tiling subsystem is absent.
-
-// No `tiling_mods` local: the variants module resolves its metadata through
-// contract.activeLayoutMeta, so it never names the tiling registry at all.
+// The active layout's variant metadata comes from the generic provider status,
+// so this segment names no tiling type and needs no registry local.
 
 /// Empty-indicator sentinel: a layout with no variant indicator reserves no
 /// row width (the segment draws nothing and contributes a 0-width slot).
 const no_variant_icon = "";
 
-/// Resolves the active layout's variant indicator from metadata, by the
-/// current workspace's variant_idx. The live kind comes from the model
-/// (pipeline); the contract's pure `activeLayoutKind` applies the
-/// registry/tiling gates for both this module and its layout sibling.
+/// Resolves the active layout's variant indicator from the provider status, by
+/// the current workspace's variant_idx.
 fn getIndicator() []const u8 {
-    return contract.activeLayoutMeta(
-        pipeline.getCurrentLayout(),
-        core.tilingEnabled(),
-        struct {
-            /// The indicator is the ACTIVE VARIANT's entry, so the variant
-            /// lookup happens here (inside the pick, which owns the registry
-            /// module) rather than in the shared helper: the layout segment
-            /// has no variant dimension, and this is the only place that does.
-            fn pick(m: contract.Layout) ?[]const u8 {
-                const inds = m.indicators orelse return null;
-                const idx = pipeline.getCurrentVariantIdx();
-                if (idx >= inds.len) return null;
-                return inds[idx];
-            }
-        }.pick,
-        no_variant_icon,
-    );
+    const st = layout.status(pipeline.getCurrentLayout());
+    const inds = st.variant_indicators orelse return no_variant_icon;
+    const idx = pipeline.getCurrentVariantIdx();
+    if (idx >= inds.len) return no_variant_icon;
+    return inds[idx];
 }
 
 /// Paints the variant indicator, or nothing at all when tiling is disabled or

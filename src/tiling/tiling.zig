@@ -6,6 +6,7 @@ const model = @import("model");
 const log = std.log.scoped(.tiling);
 
 const contract = @import("tiling_contract");
+const port = @import("layout_port");
 
 /// ICCCM 4.1.2.3 size-hint application: increment snap, max-size clamp, then aspect
 /// clamp (with a re-snap, since a client may declare both). Declared minimums are
@@ -563,8 +564,8 @@ pub fn layoutModule(
 }
 
 // Tiling-order transitions: the tiling engine owns layout-order mutations on the
-// model. Core/window call sites reach these through the build-generated
-// `tiling_seam` (has_tiling-gated stubs), never by naming this module.
+// model. Core/window call sites reach these through the generic `layout_provider`
+// port, never by naming this module.
 
 fn moveTiled(list: anytype, win: model.WindowId, from: usize, to: usize) void {
     list.orderedRemove(from);
@@ -634,4 +635,128 @@ pub fn adjustPrimaryWidth(m: *model.Model, delta: f32) void {
         model.min_master_width,
         model.max_master_width,
     );
+}
+
+/// The tiling adapter for core's generic layout port. The generated
+/// `layout_provider` module selects this when the subsystem is present and
+/// core's inert `null_provider` when it is not.
+pub const provider: port.Provider = .{
+    .count = tiling_mods.len,
+    .compute = compute,
+    .status = statusOf,
+    .indexByName = layoutByName,
+    .nameFor = moduleName,
+    .variantCount = variantCount,
+    .hasVariantParse = hasVariantParseOf,
+    .variantParse = variantParseOf,
+    .cycleKind = cycleKind,
+    .preReconcile = preReconcileOf,
+    .viewport = viewportOf,
+    .spawnHeadSlot = spawnHeadSlotOf,
+    .splitPlan = splitPlanOf,
+    .reorderTiled = reorderTiled,
+    .stepTiled = stepTiled,
+    .swapFocusedWithPrevious = swapFocusedWithPrevious,
+    .adjustPrimaryWidth = adjustPrimaryWidth,
+};
+
+fn statusOf(kind: u8) port.Status {
+    const md = contract.moduleOf(kind) orelse return .{};
+    return .{
+        .active = true,
+        .name = md.name,
+        .icon = md.icon,
+        .variant_count = md.variant_count,
+        .variant_indicators = md.indicators,
+    };
+}
+
+fn variantParseOf(kind: u8, value: []const u8) ?u8 {
+    const md = contract.moduleOf(kind) orelse return null;
+    const f = md.variant_parse orelse return null;
+    return f(value);
+}
+
+fn hasVariantParseOf(kind: u8) bool {
+    const md = contract.moduleOf(kind) orelse return false;
+    return md.variant_parse != null;
+}
+
+fn preReconcileOf(
+    kind: u8,
+    params: model.LayoutParams,
+    count: usize,
+    wa_width: u16,
+) ?model.LayoutParams {
+    const md = contract.moduleOf(kind) orelse return null;
+    const f = md.preReconcile orelse return null;
+    return f(params, count, wa_width);
+}
+
+fn viewportOf(kind: u8, count: usize, wa_width: u16) ?port.Viewport {
+    const md = contract.moduleOf(kind) orelse return null;
+    if (md.slotWidth == null or md.maxOffset == null) return null;
+    const slot_w = md.slotWidth.?(wa_width);
+    return .{
+        .slot_w = slot_w,
+        .max_off = md.maxOffset.?(count, slot_w, wa_width),
+    };
+}
+
+/// Primary-fifo spawn placement: the head slot a new window takes under the
+/// active layout's fifo variant, or null (lifo, single-window lists,
+/// non-fifo layouts).
+fn spawnHeadSlotOf(m: *const model.Model, home: model.WSId) ?usize {
+    const p = &m.ws[home.index].params;
+    const mv = contract.moduleOf(p.kind) orelse return null;
+    const v = mv.fifo_variant orelse return null;
+    if (p.variant_idx != v) return null;
+    if (m.ws[home.index].tiled_order.len <= 1) return null;
+    return 0;
+}
+
+/// Split plan for a tiled edge-drag. Only the master layout backs a split:
+/// left/right adjust the primary width, an interior stack divider adjusts the
+/// secondary balance. Any other layout (or no resolved layout) returns null so
+/// the caller falls back to float-detach.
+fn splitPlanOf(
+    m: *const model.Model,
+    win: model.WindowId,
+    edge: port.SplitEdge,
+    rect: model.Rect,
+    wa: model.Rect,
+    primary_on_right: bool,
+    kind: u8,
+) ?port.SplitPlan {
+    const md = contract.moduleOf(kind) orelse return null;
+    if (!std.mem.eql(u8, md.name, "master")) return null;
+    const ws = &m.ws[m.current.index];
+    const p = ws.params;
+    const base: port.SplitPlan = .{
+        .sign = if (primary_on_right) -1 else 1,
+        .start = 0,
+        .wa_w = @floatFromInt(wa.width),
+        .wa_h = @floatFromInt(wa.height),
+    };
+    switch (edge) {
+        .left, .right => {
+            var s = base;
+            s.knob = .primary;
+            s.start = p.primary_width;
+            return s;
+        },
+        .top, .bottom => {
+            const idx = ws.tiled_order.indexOfScalar(win) orelse return null;
+            if (idx < p.primary_count) return null; // master rows: no knob
+            const outer = if (edge == .top)
+                rect.y <= wa.y
+            else
+                @as(i32, rect.y) + @as(i32, rect.height) >= wa.y + @as(i32, wa.height);
+            if (outer) return null;
+            var s = base;
+            s.knob = .balance;
+            s.start = p.secondary_balance;
+            return s;
+        },
+    }
 }

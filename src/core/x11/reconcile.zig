@@ -45,17 +45,15 @@
 //!      forces a recompute/re-park instead of the elision.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const model = @import("model");
 const log = std.log.scoped(.reconcile);
 
-/// The tiling engine is reached through the build-generated `tiling_seam`:
-/// with no tiling subsystem the seam is an empty struct and every `tiling.*`
-/// use sits behind a `has_tiling` gate, so reconcile still runs (park/map/
-/// stack) with the layout compute skipped. The interchange TYPES come from
-/// tiling_contract.zig, shared by the engine and this reconciler.
-const contract = @import("tiling_contract");
-const tiling = @import("tiling_seam").tiling;
+/// The generic layout port and the active provider (build-generated): with no
+/// layout subsystem the provider is inert, so reconcile still runs (park/map/
+/// stack) and simply skips the layout compute. The interchange types
+/// (`Request`/`List`/`Placement`/`Env`) come from the core-owned port.
+const port = @import("layout_port");
+const layout = @import("layout_provider").provider;
 const trace = @import("trace");
 
 /// The sent ledger: what was last sent per window, WRITE-ONLY. A diff base,
@@ -258,7 +256,7 @@ pub const Ctx = struct {
     /// Screen minus bar, computed by the caller via the bar-offset helper
     /// (workArea(ctx)); used for tiled geometry.
     workarea: model.Rect,
-    env: contract.Env = .{},
+    env: port.Env = .{},
     /// Focus/mode border color via the window layer's borders module hook
     /// (`window.borderColorOf`, P2-47); constant 0 when that module is absent
     /// (deletion semantics). Fullscreen zeroes via bw/pixel policy instead.
@@ -314,7 +312,7 @@ const Plan = struct {
     /// Which covering window owns the current workspace's screen (core model
     /// helper; `.anchored_or_visible` rule).
     fs_win: ?model.WindowId = null,
-    placements: contract.List = .{},
+    placements: port.List = .{},
     /// `pl_of_slot[i]` = index into `placements` of the placement for store
     /// slot `i`, or null when that window has none. Built alongside the layout
     /// compute, so the fused store loop resolves placements in O(1).
@@ -377,11 +375,10 @@ fn computeLayoutForWs(m: *const model.Model, ctx: *Ctx, plan: *Plan, ws: model.W
             n += 1;
         }
         if (n > 0) {
-            // `comptime` on the build flag is load-bearing: it prunes the
-            // `tiling.compute` reference in a no-tiling build, where the seam
-            // is an empty struct. A plain runtime `ctx.layout_active` would
-            // not, and the seam lookup would fail to compile.
-            const float_all = if (comptime !build_options.has_tiling) true else !ctx.layout_active;
+            // The provider's `count` is zero exactly when no layout subsystem
+            // is present; combined with the caller-resolved activation gate,
+            // that is the ONE condition under which every window floats.
+            const float_all = layout.count == 0 or !ctx.layout_active;
             if (float_all) {
                 // Tiling off: every window floats at the full work area.
                 // Emitting nothing is NOT a neutral "no layout" -- a `.tiled`
@@ -392,8 +389,8 @@ fn computeLayoutForWs(m: *const model.Model, ctx: *Ctx, plan: *Plan, ws: model.W
                     _ = plan.placements.append(.{ .win = w, .rect = wa, .visible = true });
                 }
             } else {
-                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = hints_buf[0..n], .focused = m.focused, .env = ctx.env };
-                tiling.compute(params.kind, &view, &plan.placements);
+                const req: port.Request = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = hints_buf[0..n], .focused = m.focused, .env = ctx.env };
+                layout.compute(params.kind, &req, &plan.placements);
             }
         }
     }
@@ -760,7 +757,7 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 fn desireIsNonParked(
     e: model.Entry,
     fs_win: ?model.WindowId,
-    placement: ?contract.Placement,
+    placement: ?port.Placement,
     has_kept_rect: bool,
     on_current: bool,
 ) bool {
@@ -782,12 +779,12 @@ fn computeDesire(
     e: *const model.Entry,
     win: model.WindowId,
     fs_win: ?model.WindowId,
-    placement: ?contract.Placement,
+    placement: ?port.Placement,
     winner: *?model.WindowId,
     last: SentEntry,
     on_current: bool,
 ) Desire {
-    var rect: model.Rect = contract.parked_rect;
+    var rect: model.Rect = port.parked_rect;
     var bw: u16 = ctx.env.margins.border;
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
@@ -840,10 +837,10 @@ fn computeDesire(
 /// window has none this reconcile (multi-tag orphan, off-workspace, no-tiling
 /// build). Degrades to null, never out of bounds.
 fn placementOfSlot(
-    placements: *const contract.List,
+    placements: *const port.List,
     pl_of_slot: *const [model.store_capacity]?usize,
     slot: usize,
-) ?contract.Placement {
+) ?port.Placement {
     const idx = pl_of_slot[slot] orelse return null;
     const slice = placements.constSlice();
     if (idx >= slice.len) return null;

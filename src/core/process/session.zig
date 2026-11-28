@@ -9,11 +9,10 @@ const core = @import("core");
 const log = std.log.scoped(.session);
 const model = @import("model");
 const snapshot = @import("snapshot");
-/// Layout registry (build-generated); the active layout is a `u8` index into
-/// it. Empty when the tiling subsystem is absent; has_tiling-gated so tree
-/// variants without tiling compile.
-const tiling_mods = @import("tiling_contract").tiling_mods;
-const contract = @import("tiling_contract");
+/// The generic layout provider (build-generated). Empty/inert when no layout
+/// subsystem is present; has_tiling-gated where config fields are read.
+const layout = @import("layout_provider").provider;
+const port = @import("layout_port");
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
@@ -382,11 +381,11 @@ pub fn loaded() ?*const StateFile {
 }
 
 /// The degraded-restore fallback layout kind: the active config's default
-/// layout name, re-canonicalized for defense, resolved against the registry
-/// by name, else index 0 (contract.default_kind's neutral last resort). Runs
-/// only on the removed-layout path in applyModelLevel.
+/// layout name, re-canonicalized for defense, resolved against the provider's
+/// registry by name, else index 0 (port.default_kind's neutral last resort).
+/// Runs only on the removed-layout path in applyModelLevel.
 fn resumableDefaultKind() u8 {
-    if (comptime !build_options.has_tiling) return contract.default_kind;
+    if (comptime !build_options.has_tiling) return port.default_kind;
     const layout_name = core.getState().config.tiling.defaultLayout();
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }
@@ -451,9 +450,9 @@ pub fn applyModelLevel(m: *model.Model) void {
         // default kind, loudly. variant_idx is validated for the same reason:
         // a bare ordinal whose variant list shrank would otherwise index past
         // the module's own table -- clamp to the reported count and say so.
-        const restored = @import("tiling_contract").moduleOf(s.params.kind);
-        if (restored) |l| {
-            const vc = l.variant_count;
+        const restored = layout.status(s.params.kind);
+        if (restored.active) {
+            const vc = restored.variant_count;
             if (s.params.variant_idx >= vc) {
                 log.warn(
                     "handoff: clamping restored variant_idx {} to {} (layout " ++
@@ -463,12 +462,12 @@ pub fn applyModelLevel(m: *model.Model) void {
                 s.params.variant_idx = vc -| 1;
             }
         }
-        if (restored == null and tiling_mods.len > 0) {
+        if (!restored.active and layout.count > 0) {
             const fallback = resumableDefaultKind();
             log.warn(
                 "handoff: restoring persisted layout kind {} which no " ++
                     "longer resolves ({} registered); using default kind {}",
-                .{ s.params.kind, tiling_mods.len, fallback },
+                .{ s.params.kind, layout.count, fallback },
             );
             s.params.kind = fallback;
             s.params.variant_idx = 0;

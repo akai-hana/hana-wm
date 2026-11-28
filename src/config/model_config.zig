@@ -10,11 +10,10 @@
 
 const std = @import("std");
 const core = @import("core");
-const tiling_config = @import("tiling_config");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
-const tiling = @import("tiling_seam").tiling;
-const contract = @import("tiling_contract");
+const port = @import("layout_port");
+const layout = @import("layout_provider").provider;
 const log = std.log.scoped(.model_config);
 const build_options = @import("build_options");
 
@@ -23,12 +22,17 @@ const build_options = @import("build_options");
 /// config explicitly instead of reading live state, so the boot/reload
 /// wrapper below and `seed_test` exercise the identical resolution path.
 ///
+/// The parameter is inferred rather than named: the layout config fragment is
+/// optional and lives with its subsystem, while this mandatory seeding root
+/// only speaks the generic layout port. With no layout provider the body is
+/// never instantiated, so no tiling type crosses the layer boundary.
+///
 /// `primary_width`/`secondary_balance` are runtime-only (no config
 /// representation) and reset to their defaults here.
-pub fn templateFrom(cfg: *const tiling_config.Config) model_mod.LayoutParams {
+pub fn templateFrom(cfg: anytype) model_mod.LayoutParams {
     // Config layout names resolve to registry ids here, once per seed;
     // unresolvable names fall back loudly to the neutral default.
-    const default_kind: u8 = tiling.layoutKindFallingBack(cfg.defaultLayout(), contract.default_kind);
+    const default_kind: u8 = port.kindFallingBack(&layout, cfg.defaultLayout(), port.default_kind);
     // The config grammar lets master_count rise to its u8 ceiling; seeding
     // the raw u8 would slip those couple-dozen windows directly into
     // compute's master_n, where the master-column fit gate then has to
@@ -49,7 +53,7 @@ pub fn templateFrom(cfg: *const tiling_config.Config) model_mod.LayoutParams {
 /// rule without a boot sequence.
 pub fn applyOverrides(
     m: *model_mod.Model,
-    cfg: *const tiling_config.Config,
+    cfg: anytype,
     default_kind: u8,
 ) void {
     // Both lookups resolve ONCE: they build a fixed-size workspace table per
@@ -62,7 +66,8 @@ pub fn applyOverrides(
         if (layout_overrides[id]) |oi| {
             const o = cfg.workspace_layout_overrides.items[oi];
             const kind = if (o.layout_idx < cfg.layouts.items.len)
-                tiling.layoutKindFallingBack(
+                port.kindFallingBack(
+                    &layout,
                     cfg.layouts.items[o.layout_idx],
                     default_kind,
                 )
@@ -79,9 +84,9 @@ pub fn applyOverrides(
 }
 
 /// Seeds every workspace's model params from the CURRENT config, resolving
-/// per-workspace overrides through the shared last-wins lookup rules on
-/// TilingConfig. Shared by boot-time initialization (without this the config's
-/// tiling params/workspace overrides stay inert until the first explicit
+/// per-workspace overrides through the shared last-wins lookup rules on the
+/// layout config fragment. Shared by boot-time initialization (without this the
+/// config's tiling params/workspace overrides stay inert until the first explicit
 /// reload) and post-reload re-seeding. No reconcile: callers decide when to
 /// push state to X.
 ///
@@ -90,7 +95,9 @@ pub fn applyOverrides(
 /// invariant gets its production caller here), then re-stamp per-workspace
 /// overrides. The resolution itself lives in the two pure halves above.
 pub fn seedParamsFromConfig() void {
-    if (!build_options.has_tiling) return;
+    // The config fragment is absent with the subsystem, so the field access
+    // below is pruned at comptime in a floating-only tree.
+    if (comptime !build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;
     const tpl = templateFrom(cfg);
 
@@ -122,22 +129,22 @@ pub fn applyConfigReload(m: *model_mod.Model, tpl: model_mod.LayoutParams) void 
 /// own variant_parse hook interprets the string; an unparseable/unknown
 /// string warns (Stage-1 style) and uses 0.
 fn resolveVariant(
-    cfg: *const tiling_config.Config,
+    cfg: anytype,
     kind: u8,
     override_variant: ?[]const u8,
 ) u8 {
     var value_string: ?[]const u8 = override_variant;
-    const active_mod = contract.moduleOf(kind);
+    const status = layout.status(kind);
     var v_idx: u8 = 0;
-    if (active_mod) |md| {
-        if (value_string == null) value_string = cfg.variants.get(md.name);
+    if (status.active) {
+        if (value_string == null) value_string = cfg.variants.get(status.name);
         if (value_string) |vs| {
-            if (md.variant_parse) |vp| {
-                v_idx = vp(vs) orelse blk: {
+            if (layout.hasVariantParse(kind)) {
+                v_idx = layout.variantParse(kind, vs) orelse blk: {
                     if (override_variant != null)
                         log.warn("Config: workspace layout variant '{s}' ignored — not a variant of the active layout", .{vs})
                     else
-                        log.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
+                        log.warn("Unknown {s} variants '{s}', using default", .{ status.name, vs });
                     break :blk 0;
                 };
             } else if (override_variant != null) {

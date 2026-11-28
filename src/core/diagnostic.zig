@@ -10,8 +10,8 @@ const focus = @import("focus");
 const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const model = @import("model");
-// Layout-name resolution for the state dump, via the build-generated seam.
-const tiling = @import("tiling_seam").tiling;
+// Layout-name resolution for the state dump, via the generic provider.
+const layout = @import("layout_provider").provider;
 
 /// WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
 /// state on demand (read-only); used by the dump-state command.
@@ -42,7 +42,7 @@ pub fn dumpState() void {
     if (build_options.has_tiling and core.tilingEnabled()) {
         const m = pipeline.state();
         log.info("Tiling enabled: true", .{});
-        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
+        log.info("Tiling layout:  {s}", .{layout.nameFor(pipeline.getCurrentLayout())});
         log.info("Tiled windows:  {}", .{model.tiledCountOnWs(m, m.current)});
     }
 

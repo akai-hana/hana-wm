@@ -1,13 +1,16 @@
-//! The cross-engine tiling vocabulary: the layout registry, the interchange types
-//! (`Layout`/`View`/`List`/`Placement`/`Env`/`HintsView`), and the registry
-//! helpers. Lives in `core/architecture/` — NOT `src/tiling/` — because core and
-//! the bar both reach this vocabulary while `src/tiling/` is deletable by the
-//! modularity matrix. Pure vocabulary: no X11, no features.
+//! The tiling subsystem's own contract: the layout registry, its hook set
+//! (`Layout`), and the registry helpers. The generic interchange vocabulary
+//! (`View`/`List`/`Placement`/`Env`/`HintsView`) is owned by core's
+//! `layout_port` and re-exported here so layout modules keep one import.
+//!
+//! Lives under `src/tiling/` because it is tiling vocabulary. Core, window,
+//! bar, and config reach the generic port instead; deleting this subsystem
+//! removes the contract with it.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const model = @import("model");
-const bounded = @import("bounded");
+const port = @import("layout_port");
 
 /// The tiling registry (build-generated), re-exported here so consumers share ONE
 /// conditional-import definition instead of copy-pasting the guard. Empty when the
@@ -28,11 +31,8 @@ pub const tiling_mods: []const Layout =
     if (build_options.has_tiling_registry) &@import("tiling_modules").modules else &.{};
 
 /// The neutral layout: registry index 0, the fallback for an unresolvable config
-/// layout name and for a restored `kind` that no longer resolves. NAMED because the
-/// bare index hides the consequence -- index 0 is whatever the sorted registry puts
-/// first, so a name typo would otherwise quietly pick a different layout. Every
-/// degradation path names this constant so "falls back to layout 0" stays visible.
-pub const default_kind: u8 = 0;
+/// layout name and for a restored `kind` that no longer resolves.
+pub const default_kind: u8 = port.default_kind;
 
 /// Bounds-checked registry lookup for `kind`; null when out of range (including
 /// the absent-tiling empty registry). Takes the registry AS A PARAMETER matching
@@ -144,67 +144,11 @@ pub const Layout = struct {
     indicators: ?[]const []const u8 = null,
 };
 
-/// The tiling-layout interchange vocabulary: data handed between the reconciler
-/// (sync) and any layout module's `compute`. It lives on the CONTRACT (not the
-/// engine module) so the always-compiled reconciler can reference it even when no
-/// tiling modules are present — everything goes through this one owned definition
-/// instead of a must-stay-in-lockstep duplicate.
-pub const View = struct {
-    order: []const model.WindowId,
-    params: *const model.LayoutParams,
-    workarea: model.Rect,
-    /// BY VALUE, not a pointer to a caller's stack local: a pointer could let the
-    /// `HintsView` outlive the frame that owned it for as long as any layout module
-    /// kept the `View`, and nothing in the type would say so. A value cannot dangle.
-    /// Index-aligned with `order`; lookups go through `hintsFor` so the order slice
-    /// is not stored twice.
-    hints: HintsView,
-    focused: ?model.WindowId,
-    // Environment resolved by the CALLER from config.
-    env: Env = .{},
-
-    /// Frozen size-hint lookup for one window: a scan over the (small) `order`
-    /// slice, default fallback when absent. A method on `View` because `View`
-    /// already owns `order`.
-    pub fn hintsFor(self: View, win: model.WindowId) model.SizeHints {
-        std.debug.assert(self.order.len == self.hints.len);
-        for (self.order, self.hints) |w, h| {
-            if (w == win) return h;
-        }
-        return .{};
-    }
-};
-
-/// Sentinel rect for parked placements: the zero rect. The sync layer derives
-/// parked geometry from its own policy, never from this.
-pub const parked_rect: model.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-
-/// A placement computed for one window (see View.order).
-pub const Placement = struct {
-    win: model.WindowId,
-    rect: model.Rect,
-    visible: bool,
-};
-
-/// Zero-allocation placement buffer (one entry per stored window).
-pub const List = bounded.BoundedList(Placement, model.store_capacity);
-
-/// Frozen size-hint snapshot: one hint per window in `View.order`, same length,
-/// same index; materialized by the caller each reconcile. A named alias rather
-/// than a struct, which would also carry a duplicate `order` slice.
-pub const HintsView = []const model.SizeHints;
-
-/// Caller-resolved environment, one bundled field per layout knob instead of
-/// per-layout booleans each new layout would grow. Resolved from config by the
-/// reconciler's caller; the core carries no layout-feature booleans.
-///
-/// The variant index is NOT a field here: it is config- and workspace-owned state
-/// living in `View.params.variant_idx`. A second home here would be the copy layout
-/// modules actually read, so a params change that forgot to refresh it would drive
-/// layout from a stale variant. Each module reads `v.params.variant_idx` and
-/// translates it to its own spelling.
-pub const Env = struct {
-    margins: model.Margins = .{},
-    min_dim: u16 = 0,
-    primary_on_right: bool = false,
-};
+/// Generic interchange vocabulary, owned by core's layout port and re-exported
+/// here so layout modules keep referring to `contract.View`, `contract.List`, etc.
+pub const View = port.Request;
+pub const List = port.List;
+pub const Placement = port.Placement;
+pub const parked_rect: model.Rect = port.parked_rect;
+pub const HintsView = port.HintsView;
+pub const Env = port.Env;

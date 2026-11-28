@@ -93,7 +93,7 @@ Finally, I wanted foundational source code **cleanness** and **flexibility**, bo
 - **On cleanness**, sub-systems and modules should not only be treated as detachables, but hana's source code should also NOT reference the detached modules in any way. \
 
   This means that modules interact with closed cores that introduce their own contract-based interfaces. \
-  Concretely: hana's core never imports an optional sub-system by name: it only knows the contract interfaces declared beside each sub-system (the window, bar and tiling contract files under `src/window/`, `src/bar/` and `src/core/architecture/`), and it iterates only the modules that are actually compiled in, through registries generated at build time from the files found in the tree.
+  Concretely: hana's core never imports an optional sub-system by name: it only knows the contract interfaces declared beside each sub-system (the window and bar contract files under `src/window/` and `src/bar/`, the tiling contract under `src/tiling/`, and the generic layout port in `src/core/architecture/`), and it iterates only the modules that are actually compiled in, through registries generated at build time from the files found in the tree.
 
 - **On flexibility**, the ability for users to extend hana by their own modules should be the bestest possible. \
   The general interfaces that keep cores closed to modules _also_ allow new modules to be created under them.

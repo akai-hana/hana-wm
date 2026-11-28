@@ -250,7 +250,7 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 
 # Rule 3: no xcb imports/references in the pure state vocabulary
 # (model.zig), the split contract vocabulary
-# (`src/core/architecture/tiling_contract.zig`, `contract_dispatch.zig`,
+# (`src/core/architecture/layout_port.zig`, `contract_dispatch.zig`,
 # `src/window/core/contract.zig`,
 # `src/bar/core/contract.zig`), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
@@ -280,7 +280,7 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # contract_window.zig / contract_segment.zig into the monolith and the
 # monolith's later split into per-engine contracts are both history;
 # the sweep follows the files, not the lineage.)
-mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/core/contract.zig src/bar/core/contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
+mapfile -t rule3_files < <(find src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/layout_port.zig src/window/core/contract.zig src/bar/core/contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
 if [ "${#rule3_files[@]}" -eq 0 ]; then
     viol "rule 3 (sweep input set is empty)"
     hits=""

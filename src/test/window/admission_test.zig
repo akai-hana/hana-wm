@@ -67,13 +67,15 @@ test "admission matchRule: class before instance, per-key outcome, no match is n
 }
 
 // P1-16: pin the primary-fifo/lifo spawn placement (the decision behind
-// admission.mapRequest's reorder call). fifo = the new window takes the head
-// slot (index 0); lifo = append at the tail (no reorder). Both variants and
-// the empty/single-window guards are pure, so this needs no X server.
-test "admission spawnPlacementTarget: fifo -> head (0), lifo -> tail (null)" {
-    if (!@import("build_options").has_tiling) return;
-    const contract = @import("tiling_contract");
+// admission.mapRequest's reorder call) through the generic layout provider.
+// fifo = the new window takes the head slot (index 0); lifo = append at the
+// tail (no reorder). Both variants and the empty/single-window guards are
+// pure, so this needs no X server.
+test "admission spawn placement: fifo -> head (0), lifo -> tail (null)" {
+    if (comptime !@import("build_options").has_tiling) return;
+    const layout = @import("layout_provider").provider;
     const tiling = @import("tiling");
+    const contract = @import("tiling_contract");
 
     var m: model.Model = .{};
     const home = model.WSId.fromIndex(0);
@@ -90,17 +92,17 @@ test "admission spawnPlacementTarget: fifo -> head (0), lifo -> tail (null)" {
 
     // fifo variant active: a spawn reorders to the head slot.
     m.ws[home.index].params = .{ .kind = ms_kind, .variant_idx = fifo_v };
-    try testing.expectEqual(@as(?usize, 0), admission.spawnPlacementTarget(&m, home));
+    try testing.expectEqual(@as(?usize, 0), layout.spawnHeadSlot(&m, home));
 
     // lifo variant active: no reorder; the new window appends at the tail.
     m.ws[home.index].params = .{ .kind = ms_kind, .variant_idx = lifo_v };
-    try testing.expectEqual(@as(?usize, null), admission.spawnPlacementTarget(&m, home));
+    try testing.expectEqual(@as(?usize, null), layout.spawnHeadSlot(&m, home));
 
     // fifo but only one window (or none): nothing to displace, no reorder.
     m.ws[home.index].params = .{ .kind = ms_kind, .variant_idx = fifo_v };
     m.ws[home.index].tiled_order.clear();
     try testing.expect(m.ws[home.index].tiled_order.append(10));
-    try testing.expectEqual(@as(?usize, null), admission.spawnPlacementTarget(&m, home));
+    try testing.expectEqual(@as(?usize, null), layout.spawnHeadSlot(&m, home));
 }
 
 // ---- P1-19: the admission spine ----

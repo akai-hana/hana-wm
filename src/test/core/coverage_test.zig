@@ -34,7 +34,7 @@ fn moduleNameFor(alloc: std.mem.Allocator, rel_path: []const u8) ![]const u8 {
 }
 
 /// Production stems: every `src/**/*.zig` that is not a test file itself.
-/// Build-generated modules (surfaces, composed, tiling_seam, ...) are not
+/// Build-generated modules (surfaces, composed, layout_provider, ...) are not
 /// files under src/ and never appear; the vendored runner lives under dev/.
 fn collectProductionStems(alloc: std.mem.Allocator) !std.StringHashMap(void) {
     var set: std.StringHashMap(void) = .init(alloc);

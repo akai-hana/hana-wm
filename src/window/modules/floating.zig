@@ -4,8 +4,8 @@
 //! (resize capped to the client repaint budget; moves at display rate).
 //! Tiled windows: a CENTER press detaches to floating on first motion; an
 //! EDGE/CORNER press under master adjusts the adjacent split in place and
-//! stays tiled (grabEdge/planTiledSplit classify; the split rides the
-//! keybind actions' ledger-diffed retile).
+//! stays tiled (grabEdge classifies; the split plan comes from the layout
+//! provider and the split rides the keybind actions' ledger-diffed retile).
 //!
 //! DELETION: the whole file is the OPTIONAL floating module — deleting it
 //! drops DragHooks to the contract's no-op default, so Super+drag does
@@ -33,7 +33,8 @@ const reconcile_tails = @import("reconcile_tails");
 const model = @import("model");
 const scaling = @import("scaling");
 const reconcile = @import("reconcile");
-const contract = @import("tiling_contract");
+const port = @import("layout_port");
+const layout = @import("layout_provider").provider;
 
 const DragMode = enum { move, resize, tiled_split };
 
@@ -43,27 +44,17 @@ const DragMode = enum { move, resize, tiled_split };
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 /// Which window edge a drag-start grab sits on.
-pub const GrabEdge = enum { left, right, top, bottom };
+pub const GrabEdge = port.SplitEdge;
 
 /// The split knob an edge-drag adjusts: the master/stack boundary is
 /// `primary_width`, an interior stack divider is `secondary_balance`.
-pub const SplitKnob = enum { primary, balance };
+pub const SplitKnob = port.SplitKnob;
 
 /// Plan for one tiled edge-drag, resolved once at drag start. The snapshot
 /// plus the pixel->ratio denominators let each commit apply
 /// (start + mapped-delta) - current, which self-corrects at the knob's
 /// clamp instead of drifting when a target lands outside the bounds.
-pub const TiledSplit = struct {
-    knob: SplitKnob = .primary,
-    /// dx->primary sign: -1 when the master sits on the right (dragging the
-    /// boundary right narrows the master, matching its geometry).
-    sign: f32 = 1,
-    /// The knob's value when the drag started.
-    start: f32 = 0,
-    /// Pixel->ratio denominators, resolved from the work area at drag start.
-    wa_w: f32 = 1,
-    wa_h: f32 = 1,
-};
+pub const TiledSplit = port.SplitPlan;
 
 /// Pixel band where a grab classifies as an edge (split) rather than a
 /// center (float) grab. Small enough that center drags keep working; wide
@@ -99,64 +90,6 @@ pub fn grabEdge(x: i16, y: i16, rect: model.Rect) ?GrabEdge {
         }
     }
     return best;
-}
-
-/// Resolves an edge grab into the split a tiled edge-drag adjusts, or null
-/// when no split backs the grab (null falls back to float-detach):
-///
-///   - left/right -> `primary_width`, signed by master side.
-///   - top/bottom, window in the STACK, interior divider -> `balance`. The
-///     workarea-outer test doubles as the partner test: an edge pinned to the
-///     workarea border has no divider beside it and a lone stack window's
-///     edges are all outer, so balance only ever moves a real divider.
-///   - top/bottom of a MASTER-column window -> null (no knob backs row
-///     dividers; balance is scoped to the stack).
-///
-/// `layout` is the caller-resolved registry module; anything but master maps
-/// to null. The primary_count slot test is the obvious index rule; the
-/// engine's row-fit cap can shorten the effective master column on small
-/// workareas, and that approximation only misroutes the rare geometry to a
-/// knob with no visible effect, never to wrong layout behavior.
-pub fn planTiledSplit(
-    m: *const model.Model,
-    win: model.WindowId,
-    edge: GrabEdge,
-    rect: model.Rect,
-    wa: model.Rect,
-    primary_on_right: bool,
-    layout: ?*const contract.Layout,
-) ?TiledSplit {
-    const lm = layout orelse return null;
-    if (!std.mem.eql(u8, lm.name, "master")) return null;
-    const ws = &m.ws[m.current.index];
-    const p = ws.params;
-    const base: TiledSplit = .{
-        .sign = if (primary_on_right) -1 else 1,
-        .start = 0,
-        .wa_w = @floatFromInt(wa.width),
-        .wa_h = @floatFromInt(wa.height),
-    };
-    switch (edge) {
-        .left, .right => {
-            var s = base;
-            s.knob = .primary;
-            s.start = p.primary_width;
-            return s;
-        },
-        .top, .bottom => {
-            const idx = ws.tiled_order.indexOfScalar(win) orelse return null;
-            if (idx < p.primary_count) return null; // master rows: no knob
-            const outer = if (edge == .top)
-                rect.y <= wa.y
-            else
-                @as(i32, rect.y) + @as(i32, rect.height) >= wa.y + @as(i32, wa.height);
-            if (outer) return null;
-            var s = base;
-            s.knob = .balance;
-            s.start = p.secondary_balance;
-            return s;
-        },
-    }
 }
 
 /// The pixel->ratio delta mapping: total displacement since drag start, in
@@ -331,14 +264,14 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const split_plan: ?TiledSplit = if (query.isTiledMode(win)) blk: {
         const m = pipeline.state();
         const edge = grabEdge(x, y, cur) orelse break :blk null;
-        break :blk planTiledSplit(
+        break :blk layout.splitPlan(
             m,
             win,
             edge,
             cur,
             usable_area.workArea(core.getState().screen),
             primaryOnRight(),
-            contract.moduleOf(m.ws[m.current.index].params.kind),
+            m.ws[m.current.index].params.kind,
         );
     } else null;
 
@@ -591,7 +524,7 @@ fn rectChanged(drag: *const DragState, r: model.Rect) bool {
 /// whose clients repaint on every geometry we send. Delta mapping and the
 /// per-commit reconcile both ride the existing keybind actions (`adjust*`),
 /// so the ledger-diffed retile path is the proven one. Unreachable in
-/// no-tiling builds (planTiledSplit is null there).
+/// no-layout builds (the provider's splitPlan is null there).
 fn commitTiledSplit(drag: *DragState, dx: i32, dy: i32) void {
     const s = drag.split;
     const rate: f64 = @min(hz.detectedHz(), max_resize_commit_hz);

@@ -35,11 +35,10 @@ const icccm = @import("icccm");
 const reply_mod = @import("reply");
 const title_cache = @import("title_cache");
 const atoms = @import("atoms");
-const contract = @import("tiling_contract");
 const focus = @import("focus");
 const model_mod = @import("model");
 const window_state_ops = @import("window_state_ops");
-const tiling_seam = @import("tiling_seam");
+const layout = @import("layout_provider").provider;
 const types = @import("types");
 const window = @import("window");
 const session = @import("session");
@@ -493,27 +492,6 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
 /// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
 /// through as a parameter because no model entry exists when the reply
 /// drains. The model entry is the single store for size hints.
-/// Where a freshly-admitted tiled window should be reordered to on `home`:
-/// the primary-column head slot (index 0) under the active layout's fifo
-/// variant, null otherwise (lifo, single-window lists, non-fifo layouts).
-///
-/// Pure and headless: the whole spawn-placement decision, extracted so
-/// admission_test can pin both variants without an X server. The policy is
-/// metadata-driven — the active module declares which of its variant indices
-/// is the fifo one (`fifo_variant`), and the new window only takes the head
-/// when that variant is active AND a previous window already holds the slot
-/// (`tiled_order.len > 1`), so the first window on an empty column is never
-/// reordered.
-pub fn spawnPlacementTarget(m: *const model_mod.Model, home: model_mod.WSId) ?usize {
-    if (!build_options.has_tiling) return null;
-    const p = &m.ws[home.index].params;
-    const mv = contract.moduleOf(p.kind) orelse return null;
-    const v = mv.fifo_variant orelse return null;
-    if (p.variant_idx != v) return null;
-    if (m.ws[home.index].tiled_order.len <= 1) return null;
-    return 0; // fifo: the new window lands at the head; the old head drops one slot
-}
-
 /// The map front-end for one MapRequest: resolve the admission cookies'
 /// replies, then admit. The window is mapped under the same grab that does
 /// the model write, so a tiled spawn never flashes at its default position.
@@ -563,8 +541,11 @@ pub fn mapRequest(
         // Primary-fifo variant spawn placement (it is SPAWN policy, not
         // membership policy — register itself lives in window_state_ops):
         // a new window takes the primary-column head slot, and the previous
-        // head window drops one slot. Pinned headlessly by
-        // spawnPlacementTarget (admission_test), which is the whole decision.
+        // head window drops one slot. The decision and the reorder both ride
+        // the generic layout provider, so a tree with no layout subsystem
+        // simply appends. Pinned headlessly by
+        // layout_provider_test (layout_provider_test.zig), which is the
+        // whole decision.
         // Clamp the requested home workspace so a misconfigured target
         // can't index past the `ws` array in ReleaseFast (defense in depth;
         // the MapRequest front-end already resolves/clamps the target).
@@ -572,8 +553,8 @@ pub fn mapRequest(
             m.current
         else
             window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(m.current.index));
-        if (spawnPlacementTarget(m, home)) |head_slot|
-            tiling_seam.reorderTiled(m, win, head_slot);
+        if (layout.spawnHeadSlot(m, home)) |head_slot|
+            layout.reorderTiled(m, win, head_slot);
     }
     focus.initWindowGrabs(win); // protocol-side keygrabs, both paths do this
     core.window.bump(); // a window was admitted

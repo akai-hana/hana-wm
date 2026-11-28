@@ -1,9 +1,11 @@
 //! Acceptance for P2-55: the registry helpers are parameterizable, so a test
 //! can inject a fake layout registry instead of depending on the build
-//! generated `tiling_mods` singleton. Non-gated on purpose -- the helpers live
-//! in the always compiled `tiling_contract`, and this is what proves the
-//! `moduleOfRegistry` / `activeLayoutMetaFrom` shapes carry their own registry
-//! rather than reaching for the singleton.
+//! generated `tiling_mods` singleton. The helpers live in the tiling
+//! subsystem's contract, and this is what proves the `moduleOfRegistry` /
+//! `activeLayoutMetaFrom` shapes carry their own registry rather than reaching
+//! for the singleton.
+
+// build-gate: tiling
 
 const std = @import("std");
 const testing = std.testing;

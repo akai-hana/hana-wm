@@ -16,7 +16,7 @@ const helpers = @import("helpers");
 const build_options = @import("build_options");
 const window_state_ops = @import("window_state_ops");
 const window = @import("window");
-const contract = @import("tiling_contract");
+const layout = @import("layout_provider").provider;
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
@@ -256,45 +256,46 @@ test "grabEdge: nearest edge in band, corner ties vertical, center falls through
     try testing.expect(floating.grabEdge(300, 200, r) == null);
 }
 
-test "planTiledSplit: master routes, stack balance rules, fallbacks to null" {
+test "splitPlan: master routes, stack balance rules, fallbacks to null" {
+    if (comptime !build_options.has_tiling) return;
     var m = makeModel();
     regCur(&m, 1); // master slot (params.primary_count = 1)
     regCur(&m, 2); // first stack slot
     const wa: model.Rect = .{ .x = 0, .y = 0, .width = 1280, .height = 800 };
-    const master: contract.Layout = .{ .name = "master" };
-    const monocle: contract.Layout = .{ .name = "monocle" };
+    const master = layout.indexByName("master") orelse return;
+    const monocle = layout.indexByName("monocle") orelse return;
     const mrect: model.Rect = .{ .x = 0, .y = 100, .width = 600, .height = 600 };
     const srect: model.Rect = .{ .x = 600, .y = 400, .width = 680, .height = 300 };
 
     // any vertical edge -> primary_width, signed by master side, wa-width
     // denominator; start snapshots the live knob value
-    var s = floating.planTiledSplit(&m, 1, .left, mrect, wa, false, &master).?;
+    var s = layout.splitPlan(&m, 1, .left, mrect, wa, false, master).?;
     try testing.expectEqual(floating.SplitKnob.primary, s.knob);
     try testing.expectEqual(@as(f32, 1), s.sign);
     try testing.expectEqual(@as(f32, 0.5), s.start);
     try testing.expectEqual(@as(f32, 1280), s.wa_w);
-    s = floating.planTiledSplit(&m, 1, .right, mrect, wa, true, &master).?;
+    s = layout.splitPlan(&m, 1, .right, mrect, wa, true, master).?;
     try testing.expectEqual(@as(f32, -1), s.sign);
-    s = floating.planTiledSplit(&m, 2, .left, srect, wa, false, &master).?;
+    s = layout.splitPlan(&m, 2, .left, srect, wa, false, master).?;
     try testing.expectEqual(floating.SplitKnob.primary, s.knob);
 
     // a master-row horizontal divider has no knob behind it -> null
-    try testing.expect(floating.planTiledSplit(&m, 1, .bottom, mrect, wa, false, &master) == null);
+    try testing.expect(layout.splitPlan(&m, 1, .bottom, mrect, wa, false, master) == null);
 
     // stack, interior divider -> balance, wa-height denominator, start 0
-    s = floating.planTiledSplit(&m, 2, .top, srect, wa, false, &master).?;
+    s = layout.splitPlan(&m, 2, .top, srect, wa, false, master).?;
     try testing.expectEqual(floating.SplitKnob.balance, s.knob);
     try testing.expectEqual(@as(f32, 0), s.start);
     try testing.expectEqual(@as(f32, 800), s.wa_h);
 
     // stack edges pinned to the workarea border have no divider beside them
     const outer: model.Rect = .{ .x = 600, .y = 0, .width = 680, .height = 800 };
-    try testing.expect(floating.planTiledSplit(&m, 2, .top, outer, wa, false, &master) == null);
-    try testing.expect(floating.planTiledSplit(&m, 2, .bottom, outer, wa, false, &master) == null);
+    try testing.expect(layout.splitPlan(&m, 2, .top, outer, wa, false, master) == null);
+    try testing.expect(layout.splitPlan(&m, 2, .bottom, outer, wa, false, master) == null);
 
     // anything but master (and no resolved layout at all) -> float fallback
-    try testing.expect(floating.planTiledSplit(&m, 2, .left, srect, wa, false, &monocle) == null);
-    try testing.expect(floating.planTiledSplit(&m, 2, .left, srect, wa, false, null) == null);
+    try testing.expect(layout.splitPlan(&m, 2, .left, srect, wa, false, monocle) == null);
+    try testing.expect(layout.splitPlan(&m, 2, .left, srect, wa, false, 255) == null);
 }
 
 test "mappedSplitDelta: total displacement in knob units" {

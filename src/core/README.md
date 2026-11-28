@@ -22,8 +22,9 @@ name.
 - `model.zig` is the pure window/workspace model: windows, workspaces, tags,
   focus, and tiled order. It is deliberately X11-free.
 - `architecture/` holds the cross-engine contracts. `contract_dispatch.zig`
-  provides `providerOf`/`callAll`; `tiling_contract.zig` holds the layout
-  registry and interchange types.
+  provides `providerOf`/`callAll`; `layout_port.zig` is the generic layout
+  port core, window, bar, and config speak, with the tiling adapter supplied
+  by the subsystem when present.
 - `input/` is keyboard and mouse handling (`dispatch`, `keybinds`, `keymap`,
   `keys`, `masks`, `mouse`, `xkb`, `cursor`).
 - `loop/` is the event loop and pipeline (`events.zig`, `pipeline.zig`).

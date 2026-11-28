@@ -15,11 +15,11 @@ const build_options = @import("build_options");
 const log = std.log.scoped(.pipeline);
 const profile = @import("profile");
 
-/// Layout registry (build-generated); the active layout is a `u8` index into it (see
-/// model.LayoutParams.kind). Empty when the tiling subsystem is absent. Gated on
-/// has_tiling so tree variants without tiling compile.
-const contract = @import("tiling_contract");
-const tiling = @import("tiling_seam").tiling;
+/// The generic layout port and the active provider (build-generated). Core
+/// reads layout metadata through these; when no layout subsystem is present
+/// the provider is inert, so every lookup degrades to floating-only.
+const port = @import("layout_port");
+const layout = @import("layout_provider").provider;
 const scaling = @import("scaling");
 
 const reconcile = @import("reconcile");
@@ -73,7 +73,7 @@ pub inline fn mut() *model_mod.Model {
 /// unresolvable config name is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
     if (core.isModelReady()) return state().ws[state().current.index].params.kind;
-    if (comptime !build_options.has_tiling) return contract.default_kind;
+    if (comptime !build_options.has_tiling) return port.default_kind;
     return defaultIndexForLayoutName(core.getState().config.tiling.defaultLayout());
 }
 
@@ -85,13 +85,13 @@ pub inline fn getCurrentVariantIdx() usize {
 }
 
 /// Resolves a config layout name to a registry index (see model.LayoutParams.kind),
-/// collapsing to `contract.default_kind` when the name does not resolve. Loud, never
+/// collapsing to `port.default_kind` when the name does not resolve. Loud, never
 /// silent -- an unresolvable layout name is a config bug. Shared by getCurrentLayout
 /// (pre-init fallback) and handoff's restored-layout degradation so both resolve
 /// config names identically.
 pub fn defaultIndexForLayoutName(name: []const u8) u8 {
-    if (!build_options.has_tiling) return contract.default_kind;
-    return tiling.layoutKindFallingBack(name, contract.default_kind);
+    if (comptime !build_options.has_tiling) return port.default_kind;
+    return port.kindFallingBack(&layout, name, port.default_kind);
 }
 
 var g_sink: xcb_sink.XcbSink = undefined;
@@ -105,13 +105,13 @@ pub inline fn syncSink() sink.Sink {
 
 var g_ctx: reconcile.Ctx = undefined;
 
-/// The tiling engine environment for a workspace, resolved from live config (scaled
+/// The layout environment for a workspace, resolved from live config (scaled
 /// margins, min_dim, master side).
 ///
 /// It takes no layout params: everything left in `Env` is a config-derived constant,
 /// while the workspace's VARIANT index is model state reaching a layout module as
-/// `View.params.variant_idx`.
-fn tilingEnv() contract.Env {
+/// `Request.params.variant_idx`.
+fn layoutEnv() port.Env {
     if (comptime !build_options.has_tiling) return .{
         .margins = .{ .gap = 0, .border = 0 },
         .min_dim = types.default_min_window_dim,
@@ -143,7 +143,7 @@ fn ctx() *reconcile.Ctx {
     assertGrab(grab_depth == 0);
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
-    const env = tilingEnv();
+    const env = layoutEnv();
     g_ctx = .{
         .sink = syncSink(),
         .screen = .{
@@ -156,32 +156,28 @@ fn ctx() *reconcile.Ctx {
         .env = env,
         .color_of = window.borderColorOf,
         .bar_win = usable_area.mappedSurfaceWindow(),
-        // Resolved ONCE here, through the same call the bar uses, so geometry and the
-        // bar's "no layout" report can never disagree.
-        .layout_active = contract.activeLayoutKind(
-            state().ws[state().current.index].params.kind,
-            core.tilingEnabled(),
-        ) != null,
+        // Resolved ONCE here, through the same provider the bar reads, so
+        // geometry and the bar's "no layout" report can never disagree.
+        .layout_active = layout.status(state().ws[state().current.index].params.kind).active,
     };
     return &g_ctx;
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke point,
-/// dispatched through the active layout module's preReconcile hook (the scroll addon
+/// dispatched through the active provider's preReconcile hook (the scroll addon
 /// registers snap-right-on-growth + clamp; no hook = no duty).
 fn preReconcileDuties() void {
-    if (!build_options.has_tiling) return;
+    if (layout.count == 0) return;
     // Internal choke point: touches the private `instance` directly (not via
     // state()/mut()) because this is the model owner applying the active layout's pure
     // pre-reconcile delta (value-in, value-out). The WRITE goes through
     // window_state_ops.applyParamsDelta, closing the last un-gated channel.
     const ws = instance.current;
     const p = instance.ws[ws.index].params;
-    const md = contract.moduleOf(p.kind) orelse return;
-    if (md.preReconcile == null) return;
     const n = model_mod.tiledCountOnWs(&instance, ws);
     const wa = usable_area.workArea(core.getState().screen);
-    window_state_ops.applyParamsDelta(&instance, ws, md.preReconcile.?(p, n, wa.width));
+    const next = layout.preReconcile(p.kind, p, n, wa.width) orelse return;
+    window_state_ops.applyParamsDelta(&instance, ws, next);
 }
 
 /// The ONE place a reconcile ctx is built and the one place pre-reconcile duties run.
